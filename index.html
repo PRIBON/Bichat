@@ -217,20 +217,24 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 // canonique renvoyée par l'Apps Script (get-version) pour proposer la mise à jour.
 const APP_VERSION = "1.2.1";
 
+
+
+  
 // >>> À REMPLIR avec la config de TON projet Firebase PRIBON (voir README) <<<
 const FIREBASE_CONFIG = {
-  apiKey: "AIzaSyAe-oMdObRk0_JSMHK7F4Mgqo7yMrHEK5g",
+ apiKey: "AIzaSyDuWxm_3ZSnhF5NNmJIBuBHsKVZOvwSxJI",
 
-  authDomain: "robespierre-65cdf.firebaseapp.com",
+    authDomain: "bichat-80d62.firebaseapp.com",
 
-  databaseURL: "https://robespierre-65cdf-default-rtdb.europe-west1.firebasedatabase.app",
+    databaseURL: "https://bichat-80d62-default-rtdb.europe-west1.firebasedatabase.app",
 
-  projectId: "robespierre-65cdf",
+    projectId: "bichat-80d62",
 
-  appId: "1:870656040014:web:8a33269cc4bc348145771f"
+
+appId: "1:230290923547:web:620b87f707d8883fd1d8be"
  };
 // UNE app + UNE base Firebase par dépôt. Pour dupliquer : changer ce bloc + FIREBASE_CONFIG.
-const STORE = { code: "ROBESPIERRE", label: "Pribon Robespierre", appName: "PRIBON ROBESPIERRE" };
+const STORE = { code: "BICHAT", label: "Pribon Bichat", appName: "PRIBON BICHAT" };
 
 // Logo PRIBON (affiché à la connexion). Repli sur emoji si l'image ne charge pas.
 const LOGO_URL = "https://static.wixstatic.com/media/bbaec6_145fdeb1127d41eab38bb1c4fb0bee94~mv2.png/v1/crop/x_0,y_18,w_1772,h_570/fill/w_249,h_79,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/PRIBON_logo_generique_GF.png";
