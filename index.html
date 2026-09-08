@@ -493,6 +493,40 @@ async function readPDF(arrayBuffer){
   return pickPdfParser(rowLines);
 }
 
+// --- Parseur XLSX Agidra (bon de commande téléchargé depuis leur site) ---
+// Colonnes : REF | Désignation produit | Code EAN | ... | Colisage | Qté(colis) | ... | HT | TVA
+// attendu (unités) = Qté(colis) × Colisage ; cdt = Colisage (affichage en colis).
+function parseAgidraRows(rows, filename){
+  if(!rows || !rows.length) return { docNumber:"", supplier:"", lines:[] };
+  const norml=s=>norm(String(s));
+  let hIdx=-1, head=[], isAgidra=false;
+  for(let i=0;i<Math.min(rows.length,10);i++){
+    const r=(rows[i]||[]).map(norml);
+    if(r.some(c=>c.includes("designation")) && r.some(c=>c.includes("colisage"))){ hIdx=i; head=r; isAgidra=true; break; }
+  }
+  if(hIdx<0){ head=(rows[0]||[]).map(norml); hIdx=0; }
+  const col=(names)=>{ for(const n of names){ const idx=head.findIndex(h=>h.includes(n)); if(idx>=0) return idx; } return -1; };
+  const iRef=col(["ref"]), iDes=col(["designation"]), iEan=col(["ean"]),
+        iColisage=col(["colisage"]), iQte=col(["qte","quantite","qty"]);
+  const out=[];
+  for(let r=hIdx+1;r<rows.length;r++){
+    const c=rows[r]||[];
+    const ref=String(iRef>=0?c[iRef]:"").trim();
+    const des=String(iDes>=0?c[iDes]:"").trim();
+    if(!ref && !des) continue;
+    if(!ref && /^(total|nb |poids|epicerie|boisson)/i.test(des)) continue; // lignes de regroupement
+    const colisage=toNum(iColisage>=0?c[iColisage]:0)||0;
+    const qcolis=toNum(iQte>=0?c[iQte]:0);
+    const attendu = colisage>0 ? Math.round(qcolis*colisage) : qcolis;
+    out.push({ article:ref, ean:String(iEan>=0?c[iEan]:"").trim().replace(/^0+(?=\d)/,""),
+      designation:des, marque:"", attendu, cdt: colisage>0?colisage:null, categorie:"Autres" });
+  }
+  // n° de commande depuis le nom du fichier (ex: export_commande_2608001922_20260908.xlsx)
+  const mCmd=String(filename||"").match(/commande[_-]?(\d{5,})/i);
+  const cmd = mCmd?mCmd[1]:"";
+  return { docNumber:cmd, supplier: isAgidra?"AGIDRA":"", lines:out, commandes: cmd?[cmd]:[] };
+}
+
 // Fusionne plusieurs fichiers en UN seul document.
 // Cas type : un fournisseur = 1 commande frais + 1 commande sec = 2 bons de commande,
 // mais un SEUL bon de livraison commun. On regroupe les lignes sous un même document.
@@ -528,6 +562,13 @@ async function parseAnyFile(file){
   if(name.endsWith(".pdf")){
     const buf=await file.arrayBuffer();
     return { ...(await readPDF(buf)), format:"PDF" };
+  }
+  if(name.endsWith(".xlsx") || name.endsWith(".xls")){
+    const buf=await file.arrayBuffer();
+    const wb=XLSX.read(new Uint8Array(buf),{type:"array"});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+    return { ...parseAgidraRows(rows, file.name), format:"XLSX" };
   }
   // CSV/TXT : décoder en Windows-1252 (les BL Elibio sont en ANSI)
   const buf=await file.arrayBuffer();
@@ -1508,8 +1549,8 @@ function AdminLoad(){
       <div className="upload-zone" onClick={()=>fileRef.current&&fileRef.current.click()}>
         <div className="icon">⬆️</div>
         <div className="label">{parsed?"➕ Ajouter un autre fichier (fusion)":"Charger le(s) fichier(s) BL"}</div>
-        <div className="hint">CSV (Elibio), TXT tabulé, ou PDF (Vitafrais / Biodis)<br/>Plusieurs fichiers possibles → fusionnés en 1 seul document (ex : commande frais + sec, 1 BL commun)</div>
-        <input ref={fileRef} type="file" accept=".csv,.txt,.pdf" multiple style={{display:"none"}} onChange={onFile}/>
+        <div className="hint">CSV (Elibio), TXT tabulé, PDF (Vitafrais / Biodis) ou XLSX (Agidra)<br/>Plusieurs fichiers possibles → fusionnés en 1 seul document (ex : commande frais + sec, 1 BL commun)</div>
+        <input ref={fileRef} type="file" accept=".csv,.txt,.pdf,.xlsx,.xls" multiple style={{display:"none"}} onChange={onFile}/>
       </div>
       {fileCount>1 && <div className="small-note" style={{color:"#1a4d2e",fontWeight:700}}>📎 {fileCount} fichiers fusionnés en 1 document.</div>}
       {busy && <div className="small-note">Lecture…</div>}
