@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>PRIBON Bichat — Réception</title>
+<title>PRIBON — Réception</title>
 <script>
 // Repli CDN : si jsDelivr est bloqué, on recharge depuis unpkg.
 function __cdnFB(u){ document.write('<scr'+'ipt src="'+u+'"></scr'+'ipt>'); }
@@ -60,6 +60,10 @@ function __cdnFB(u){ document.write('<scr'+'ipt src="'+u+'"></scr'+'ipt>'); }
   .header-btn:active { background: rgba(255,255,255,.3); }
   .conn-status { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: rgba(255,255,255,.2); }
   .conn-status.offline { background: #d32f2f; }
+  .store-switch { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .store-switch-lbl { font-size:12px; opacity:.85; font-weight:600; }
+  .store-chip { background:rgba(255,255,255,.15); color:#fff; padding:7px 14px; border-radius:20px; font-size:13px; font-weight:700; border:1.5px solid rgba(255,255,255,.35); }
+  .store-chip.on { background:#fff; color:#1a4d2e; border-color:#fff; }
 
   /* Login / centered screens */
   .screen-center {
@@ -225,20 +229,24 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const APP_VERSION = "1.0.0";
 
 // >>> À REMPLIR avec la config de TON projet Firebase PRIBON (voir README) <<<
-const FIREBASE_CONFIG = {
- apiKey: "AIzaSyDuWxm_3ZSnhF5NNmJIBuBHsKVZOvwSxJI",
+/* ===== Magasins (multi-magasins) — MÊME code pour tous, config Firebase par magasin ===== */
+const STORES = {
+  ROBESPIERRE: { code:"ROBESPIERRE", label:"Pribon Robespierre", appName:"PRIBON ROBESPIERRE",
+    firebase:{ apiKey:"AIzaSyAe-oMdObRk0_JSMHK7F4Mgqo7yMrHEK5g", authDomain:"robespierre-65cdf.firebaseapp.com",
+      databaseURL:"https://robespierre-65cdf-default-rtdb.europe-west1.firebasedatabase.app",
+      projectId:"robespierre-65cdf", appId:"1:870656040014:web:8a33269cc4bc348145771f" } },
+  BICHAT: { code:"BICHAT", label:"Pribon Bichat", appName:"PRIBON BICHAT",
+    firebase:{ apiKey:"AIzaSyDuWxm_3ZSnhF5NNmJIBuBHsKVZOvwSxJI", authDomain:"bichat-80d62.firebaseapp.com",
+      databaseURL:"https://bichat-80d62-default-rtdb.europe-west1.firebasedatabase.app",
+      projectId:"bichat-80d62", appId:"1:230290923547:web:620b87f707d8883fd1d8be" } },
+};
+// >>> SEULE LIGNE QUI CHANGE ENTRE LES DÉPÔTS : le magasin par défaut de CE déploiement. <<<
+// Les vendeurs de cette URL se connectent sur ce magasin ; l'admin peut basculer sur un autre.
+const DEFAULT_STORE_CODE = "BICHAT";
+let STORE = STORES[DEFAULT_STORE_CODE];
+// Compat : certaines vérifs lisent encore FIREBASE_CONFIG (magasin par défaut).
+const FIREBASE_CONFIG = STORES[DEFAULT_STORE_CODE].firebase;
 
-    authDomain: "bichat-80d62.firebaseapp.com",
-
-    databaseURL: "https://bichat-80d62-default-rtdb.europe-west1.firebasedatabase.app",
-
-    projectId: "bichat-80d62",
-
-
-appId: "1:230290923547:web:620b87f707d8883fd1d8be"
- };
-// UNE app + UNE base Firebase par dépôt. Pour dupliquer : changer ce bloc + FIREBASE_CONFIG.
-const STORE = { code: "BICHAT", label: "Pribon Bichat", appName: "PRIBON BICHAT" };
 // Logo PRIBON (affiché à la connexion). Repli sur emoji si l'image ne charge pas.
 const LOGO_URL = "https://static.wixstatic.com/media/bbaec6_145fdeb1127d41eab38bb1c4fb0bee94~mv2.png/v1/crop/x_0,y_18,w_1772,h_570/fill/w_249,h_79,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/PRIBON_logo_generique_GF.png";
 
@@ -270,12 +278,18 @@ function genSessionId(){ return "s"+Date.now().toString(36)+Math.random().toStri
 
 /* ===================================================================== */
 
-// ---- Firebase (Realtime Database uniquement) ----
-let db = null;
-try {
-  firebase.initializeApp(FIREBASE_CONFIG);
-  db = firebase.database();
-} catch(e) { console.error("Firebase init:", e); }
+// ---- Firebase (Realtime Database) : UNE base par magasin, apps nommées ----
+const _dbCache = {};
+function dbFor(code){
+  if(_dbCache[code]) return _dbCache[code];
+  try{
+    let app; try{ app=firebase.app(code); }catch(e){ app=firebase.initializeApp(STORES[code].firebase, code); }
+    _dbCache[code]=firebase.database(app);
+  }catch(e){ console.error("Firebase init "+code+":", e); _dbCache[code]=null; }
+  return _dbCache[code];
+}
+// `db` = base du magasin ACTIF (réassignée quand l'admin bascule de magasin).
+let db = dbFor(DEFAULT_STORE_CODE);
 
 const APPS_SCRIPT_READY = () => APPS_SCRIPT_URL && !APPS_SCRIPT_URL.includes("__A_REMPLIR__");
 const OAUTH_READY = () => OAUTH_CLIENT_ID && !OAUTH_CLIENT_ID.includes("__");
@@ -605,7 +619,7 @@ async function releaseSession(code, sessionId){
 // Ne se déconnecte PAS sur simple disparition du nœud (micro-coupure réseau) : on le ré-établit.
 function useSessionGuard(operator, onKicked){
   useEffect(()=>{
-    if(!db || !operator || !operator.code || !operator.sessionId) return;
+    if(!db || !operator || !operator.code || !operator.sessionId || operator.isMaster) return;
     const code=operator.code, sid=operator.sessionId;
     const ref=db.ref("sessions/"+code);
     try{ ref.onDisconnect().remove(); }catch(e){}
@@ -694,7 +708,7 @@ function ResponsableLogin({ onAuthed }){
             const r=await fetch(APPS_SCRIPT_URL,{ method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"},
               body:JSON.stringify({ action:"verify-responsable", idToken:resp.credential }) });
             const j=await r.json();
-            if(j && j.allowed) onAuthed();
+            if(j && j.allowed) onAuthed(j.email);
             else setErr("Accès refusé : "+((j&&j.email)||"")+" n'est pas autorisé.");
           }catch(e){ setErr("Erreur : "+e.message); }
           setBusy(false);
@@ -762,7 +776,7 @@ function LoginScreen({ onOperator, onAdmin }){
         {err && <div className="err">{err}</div>}
         <div className="small-note">Votre code personnel vient du gérant. Le code magasin est donné par le bureau et change toutes les 3h.</div>
       </div>
-
+<ResponsableLogin onAuthed={(email)=>onOperator({ code:'MASTER-'+String(email).split('@')[0], sessionId:genSessionId(), storeExpiresAt:null, isMaster:true, email:String(email) })}/>
       {/* Accès discrets vers le repo admin central (connexion Google là-bas). */}
       <div style={{marginTop:24,display:"flex",gap:18,justifyContent:"center"}}>
         <a className="link-btn" style={{opacity:.4,fontSize:12}} href={ADMIN_BASE+"reception.html"}>Admin</a>
@@ -775,7 +789,7 @@ function LoginScreen({ onOperator, onAdmin }){
 }
 
 /* ============================== ACCUEIL ============================== */
-function HomeScreen({ operator, onOpenDoc, onOpenReception, onLogout, onAfterValidate }){
+function HomeScreen({ operator, onOpenDoc, onOpenReception, onLogout, onAfterValidate, activeStoreCode, onSwitchStore }){
   const [docs,setDocs]=useState([]);
   const [receptions,setReceptions]=useState([]);
   const [loading,setLoading]=useState(true);
@@ -824,9 +838,19 @@ function HomeScreen({ operator, onOpenDoc, onOpenReception, onLogout, onAfterVal
   return (
     <div className="app">
       <div className="header"><div className="header-row">
-        <div><h1>📦 {STORE.label}</h1><div className="sub">Espace vendeur</div></div>
+        <div><h1>📦 {STORE.label}</h1><div className="sub">{operator.isMaster?"Espace admin (multi-magasins)":"Espace vendeur"}</div></div>
         <button className="header-btn" onClick={onLogout}>Quitter</button>
-      </div></div>
+      </div>
+      {operator.isMaster && (
+        <div className="store-switch">
+          <span className="store-switch-lbl">Magasin :</span>
+          {Object.values(STORES).map(s=>(
+            <button key={s.code} className={"store-chip"+(activeStoreCode===s.code?" on":"")}
+              onClick={()=>{ if(activeStoreCode!==s.code) onSwitchStore(s.code); }}>{s.label}</button>
+          ))}
+        </div>
+      )}
+      </div>
 
       <div className="list-wrap">
         <h3 style={{margin:"6px 4px 8px"}}>Nouvelles réceptions</h3>
@@ -933,12 +957,13 @@ function ScanModal({ onCode, onClose }){
 /* ======================== ÉCRAN RÉCEPTION =========================== */
 /* Motifs d'écart (menu déroulant). mode 'reel' = valeur saisie = reçu ; 'manque' = valeur = quantité problème. */
 const ECART_MOTIFS = [
-  { key:"mauvaise_qte",      label:"Mauvaise quantité",  ask:"Quantité réellement reçue",      mode:"reel",   avoir:true,  photo:false },
-  { key:"casse_fournisseur", label:"Casse fournisseur",  ask:"Quantité cassée",                mode:"manque", avoir:true,  photo:true  },
-  { key:"auto_conso",        label:"Auto-consommation",  ask:"Quantité auto-consommée",        mode:"manque", avoir:false, photo:true  },
-  { key:"casse_salarie",     label:"Casse (salarié)",    ask:"Quantité cassée",                mode:"manque", avoir:false, photo:true  },
-  { key:"delotage",          label:"Délotage",           ask:"Quantité manquante dans le lot", mode:"manque", avoir:true,  photo:true  },
-  { key:"perime_perte",      label:"Périmé / perte",     ask:"Quantité périmée / perdue",      mode:"manque", avoir:true,  photo:true  },
+  { key:"mauvaise_qte",      label:"Mauvaise quantité (moins reçu)", ask:"Quantité réellement reçue",      mode:"reel",   avoir:true,  photo:false },
+  { key:"manque",            label:"Manque (rien reçu sur la ligne)", ask:"Quantité NON reçue",            mode:"manque", avoir:true,  photo:false },
+  { key:"casse_fournisseur", label:"Casse fournisseur",              ask:"Quantité cassée",                mode:"manque", avoir:true,  photo:true  },
+  { key:"delotage",          label:"Délotage",                       ask:"Quantité manquante dans le lot", mode:"manque", avoir:true,  photo:true  },
+  { key:"perime",            label:"Périmé (DLC/DLUO passée)",       ask:"Quantité périmée / perdue",      mode:"manque", avoir:true,  photo:true  },
+  { key:"casse_salarie",     label:"Casse (salarié)",                ask:"Quantité cassée",                mode:"manque", avoir:false, photo:true  },
+  { key:"auto_conso",        label:"Auto-consommation",              ask:"Quantité auto-consommée",        mode:"manque", avoir:false, photo:true  },
 ];
 function motifByKey(k){ return ECART_MOTIFS.find(m=>m.key===k); }
 function motifLabel(k){ if(k==="surplus") return "Reçu en plus (surplus)"; const m=motifByKey(k); return m?m.label:(k||"écart"); }
@@ -971,7 +996,7 @@ function EcartModal({ line, current, onSave, onClose }){
     const v=toNum(val);
     if(line.poidsVariable && (!poids || toNum(poids)<=0)){ setErr("Le poids reçu est obligatoire (poids variable)."); return; }
     if(M.photo && !photoUrl){ setErr("Photo obligatoire pour ce motif."); return; }
-    // Quantité réelle (en pièces) = attendu - problème ; le .txt la divisera par le conditionnement.
+    // Selon le motif : mode "reel" = on a saisi la quantité REÇUE ; sinon = quantité PROBLÈME.
     let aptevente, reel, manque=0;
     if(M.mode==="reel"){ reel=v; aptevente=v; manque=Math.max(0, line.attendu - v); }
     else { manque=v; aptevente=Math.max(0, line.attendu - v); reel=aptevente; }
@@ -995,8 +1020,8 @@ function EcartModal({ line, current, onSave, onClose }){
         {M && (
           <div className="field">
             <label>{M.ask}</label>
-            <input inputMode="numeric" value={val} onChange={e=>setVal(e.target.value.replace(/[^0-9.,]/g,""))} placeholder="0"/>
-            <div className="small-note">{M.avoir?"→ génère une demande d'avoir":"→ pas de demande d'avoir"}{cdt?` · quantité G5 = reçu ÷ ${cdt} (conditionnement)`:""}</div>
+            <input inputMode="numeric" value={val} onChange={e=>setVal(e.target.value.replace(/[^0-9.,]/g,""))} placeholder={M.mode==="reel"?"quantité reçue":"0 (en unités)"}/>
+            <div className="small-note">{cdt&&toNum(val)>0?`= ${(toNum(val)/cdt)} colis · `:""}{M.avoir?"→ demande d'avoir":"→ signalé (pas d'avoir)"}</div>
           </div>
         )}
         {line.poidsVariable && (
@@ -1677,9 +1702,20 @@ function App(){
     return ()=>window.removeEventListener("popstate", onPop);
   },[]);
 
+  // Magasin actif : l'admin (master) peut basculer Bichat <-> Robespierre SANS code.
+  const [activeStoreCode,setActiveStoreCode]=useState(DEFAULT_STORE_CODE);
+  useEffect(()=>{ try{ document.title=STORE.appName+" — Réception"; }catch(e){} },[activeStoreCode]);
+  const switchStore=(code)=>{
+    if(!STORES[code]) return;
+    db=dbFor(code); STORE=STORES[code];        // toutes les lectures suivantes visent ce magasin
+    setCtx({}); setActiveStoreCode(code); setView("home"); // key={activeStoreCode} => re-abonnement Firebase
+  };
+
   const doLogout=()=>{
     if(operator) releaseSession(operator.code, operator.sessionId);
     setShowLogout(false); setStayMode(false); setStayCode(""); setStayErr("");
+    // Retour au magasin par défaut pour le prochain vendeur.
+    db=dbFor(DEFAULT_STORE_CODE); STORE=STORES[DEFAULT_STORE_CODE]; setActiveStoreCode(DEFAULT_STORE_CODE);
     setCtx({}); setOperator(null); setView("login");
   };
   const kicked=useCallback(()=>{ setAutoMsg("Votre code a été utilisé sur un autre appareil : vous avez été déconnecté."); doLogout(); },[operator]);
@@ -1747,7 +1783,8 @@ function App(){
         onOperator={(op)=>{ setOperator(op); setView("home"); }}
         onAdmin={()=>setView("admin")}/>}
 
-      {view==="home" && operator && <HomeScreen operator={operator}
+      {view==="home" && operator && <HomeScreen key={activeStoreCode} operator={operator}
+        activeStoreCode={activeStoreCode} onSwitchStore={switchStore}
         onOpenReception={(doc,reception)=>{ setCtx({doc,reception}); setView("reception"); }}
         onOpenDoc={(rec)=>{ // ouvrir une réception existante : besoin du doc
           db.ref("documents/"+rec.docId).get().then(s=>{ const d=s.val();
