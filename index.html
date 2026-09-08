@@ -112,7 +112,14 @@ function __cdnFB(u){ document.write('<scr'+'ipt src="'+u+'"></scr'+'ipt>'); }
   .product-card { background:#fff; border:1.5px solid #e6e8ec; border-radius:10px; padding:12px; margin-bottom:8px; transition: all .15s; }
   .product-card.conforme { background:#e8f5e9; border-color:#4caf50; }
   .product-card.ecart { background:#fff3e0; border-color:#ff9800; }
-  .designation { font-size: 15px; font-weight: 700; line-height: 1.3; margin-bottom: 4px; }
+  .designation { font-size: 15px; font-weight: 700; line-height: 1.3; margin-bottom: 4px;
+    white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+  /* Bouton "détail" pour lire toute la désignation + infos */
+  .info-btn { background:#eef2f7; color:#1a4d2e; font-weight:800; font-size:12px; padding:4px 9px; border-radius:8px; margin-left:6px; }
+  .btn-surplus { width:100%; padding:12px; font-size:14px; font-weight:800; background:#fff; color:#1565c0; border:2px solid #1e88e5; border-radius:12px; }
+  .btn-surplus.on { background:#1e88e5; color:#fff; }
+  .product-card.surplus { background:#e3f2fd; border-color:#1e88e5; }
+  .cmd-pill { display:inline-block; background:#eef2f7; color:#1a4d2e; border-radius:8px; padding:3px 8px; font-size:12px; font-weight:700; }
   .product-meta { font-size: 11px; color: #777; margin-bottom: 10px; display: flex; gap: 8px; flex-wrap: wrap; align-items:center; }
   .product-meta .article { font-family: monospace; }
   .attendu-pill { background:#eef2f7; color:#333; border-radius:8px; padding:3px 10px; font-weight:700; font-size:13px; }
@@ -215,7 +222,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
 // Version de l'app (voir VERSIONS.md). Affichée en bas + comparée à la version
 // canonique renvoyée par l'Apps Script (get-version) pour proposer la mise à jour.
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.0.0";
 
 // >>> À REMPLIR avec la config de TON projet Firebase PRIBON (voir README) <<<
 const FIREBASE_CONFIG = {
@@ -398,23 +405,26 @@ function parseTXT(text){
 }
 
 function parsePDFLines(rowLines){
-  const out=[]; let supplier=""; let docNumber="";
+  const out=[]; let supplier=""; let docNumber=""; const commandes=[];
   const lineRe=/^(\d{2,7})\s+(.*\S)\s+(\d{8,13})\s+(\d+)\s+[\d.,]+\s+[\d.,]+\s*$/;
   for(const L of rowLines){
     if(!supplier && /VITAFRAIS/i.test(L)) supplier="VITAFRAIS";
     const mBL=L.match(/n[°º]\s*BL\s*:?\s*(\d+)/i); if(mBL) docNumber=mBL[1];
+    // Un seul BL peut couvrir PLUSIEURS commandes (ex. commande frais + commande sec).
+    const mCmd=L.match(/Commande\(s\)\s*:?\s*(.+)$/i);
+    if(mCmd){ (mCmd[1].match(/\d{6,}(?:\(\d+\))?/g)||[]).forEach(x=>{ if(!commandes.includes(x)) commandes.push(x); }); }
     if(/^(Palette|Colis \d|Poids|Total|Distribution|Page|Commande|BIO :|DEM :)/i.test(L)) continue;
     const m=L.match(lineRe); if(!m) continue;
     out.push({ article:m[1], ean:m[3].replace(/^0+(?=\d)/,""),
                designation:m[2].replace(/\s+\d+$/,"").trim(), marque:"", attendu:parseInt(m[4],10), categorie:"Autres" });
   }
-  return { docNumber, supplier, lines: out };
+  return { docNumber, supplier, lines: out, commandes };
 }
 
 // --- Parseur PDF Biodis (mise en page différente de Vitafrais) ---
 function cleanDesBiodis(s){ return String(s||"").replace(/\s+(Non\s+Bio|Bio|Conv(?:ersion)?|Cosmebio|Ecocert)\s*$/i,"").trim(); }
 function parseBiodisPDF(rowLines){
-  const out=[]; let supplier="BIODIS", docNumber=""; let stopped=false;
+  const out=[]; let supplier="BIODIS", docNumber=""; let stopped=false; const commandes=[];
   const reU  = /^(\d{3,7})\s+(.+?)\s+(\d{13})\s+\d+\s+(\d+)\s+U\s+[\d.,]+\s+[\d.,]+\s+\d+\s*$/;      // ref certif EAN colis qté U prixU montant tva
   const reKG = /^(\d{3,7})\s+(.+?)\s+(\d{13})\s+\d+\s+([\d.,]+)\s*KG\s+[\d.,]+\s+[\d.,]+\s+\d+\s*$/;  // idem, quantité en KG (espace avant KG toléré)
   const reND = /^(\d{3,7})\s+(.+?)\s+(Non livr[ée]|Produit sur commande|Rupture fournisseur)\s+(\d+)\s+U\s*$/i; // non livré / sur commande / rupture
@@ -424,6 +434,8 @@ function parseBiodisPDF(rowLines){
   for(let i=0;i<rowLines.length;i++){
     const L=rowLines[i];
     const doc=L.match(/(\d{2}\/\d{2}\/\d{4})\s+(\d{6,8})\s/); if(doc && !docNumber) docNumber=doc[2];
+    const mCmd=L.match(/Commande\s*n[°º]?\s*:?\s*([\d\/ ]+)/i);
+    if(mCmd){ (mCmd[1].match(/\d{5,}/g)||[]).forEach(x=>{ if(!commandes.includes(x)) commandes.push(x); }); }
     if(/Produits en arr[eê]t long|R[ée]f[ée]rence D[ée]s/i.test(L)){ stopped=true; continue; } // section "arrêts / remplacements" : on stoppe
     if(stopped) continue;
     let m;
@@ -442,7 +454,7 @@ function parseBiodisPDF(rowLines){
       out.push({ article:art, ean:ean.replace(/^0+(?=\d)/,""), designation:cleanDesBiodis(des.join(" ")), marque:"", attendu:att, categorie:"Autres" });
     }
   }
-  return { docNumber, supplier, lines: out };
+  return { docNumber, supplier, lines: out, commandes };
 }
 // Choisit le parseur PDF selon le fournisseur détecté dans le texte.
 function pickPdfParser(rowLines){
@@ -465,6 +477,35 @@ async function readPDF(arrayBuffer){
     });
   }
   return pickPdfParser(rowLines);
+}
+
+// Fusionne plusieurs fichiers en UN seul document.
+// Cas type : un fournisseur = 1 commande frais + 1 commande sec = 2 bons de commande,
+// mais un SEUL bon de livraison commun. On regroupe les lignes sous un même document.
+// Les articles en double (même code) sont additionnés pour éviter deux cartes identiques.
+function mergeParsed(list){
+  const map=new Map(); const order=[]; const nonLivres=[];
+  const docNums=[], suppliers=[], formats=[], commandes=[]; let skipped=0;
+  list.forEach(r=>{
+    (r.lines||[]).forEach(l=>{
+      if(l.nonLivre){ nonLivres.push(l); return; }
+      const k=(l.article||"").trim() || ("ean_"+(l.ean||"")) || ("des_"+norm(l.designation));
+      if(map.has(k)){ const e=map.get(k); e.attendu=(e.attendu||0)+(l.attendu||0); }
+      else { map.set(k, {...l}); order.push(k); }
+    });
+    if(r.docNumber) docNums.push(r.docNumber);
+    if(r.supplier) suppliers.push(r.supplier);
+    if(r.format) formats.push(r.format);
+    if(r.skipped) skipped+=r.skipped;
+    (r.commandes||[]).forEach(c=>{ const s=String(c); if(!commandes.includes(s)) commandes.push(s); });
+  });
+  return {
+    docNumber:[...new Set(docNums)].filter(Boolean).join(" + "),
+    supplier:[...new Set(suppliers)].filter(Boolean).join(" / "),
+    lines: order.map(k=>map.get(k)).concat(nonLivres),
+    format:[...new Set(formats)].filter(Boolean).join("+"),
+    commandes, skipped
+  };
 }
 
 // Détecte le format et renvoie la sortie commune
@@ -797,6 +838,7 @@ function HomeScreen({ operator, onOpenDoc, onOpenReception, onLogout, onAfterVal
             <div key={d.id} className="doc-card big" onClick={()=>onOpenReception(d, already)}>
               <div className="t">{d.supplier||"Fournisseur ?"}</div>
               <div className="sub2">{d.type||"BL"} {d.docNumber} · {(d.lines||[]).length} lignes</div>
+              {d.commandes && d.commandes.length>0 && <div className="sub2">🧾 Commande(s) : {d.commandes.join(" + ")}</div>}
               {d.deliveryDate && <div className="deliv">📅 Livraison prévue : <b>{d.deliveryDate}</b></div>}
               <div className="m">
                 <span className="badge info">{d.format}</span>
@@ -899,7 +941,7 @@ const ECART_MOTIFS = [
   { key:"perime_perte",      label:"Périmé / perte",     ask:"Quantité périmée / perdue",      mode:"manque", avoir:true,  photo:true  },
 ];
 function motifByKey(k){ return ECART_MOTIFS.find(m=>m.key===k); }
-function motifLabel(k){ const m=motifByKey(k); return m?m.label:(k||"écart"); }
+function motifLabel(k){ if(k==="surplus") return "Reçu en plus (surplus)"; const m=motifByKey(k); return m?m.label:(k||"écart"); }
 
 function EcartModal({ line, current, onSave, onClose }){
   const [motif,setMotif]=useState(current?.motif||"");
@@ -1009,15 +1051,73 @@ function PoidsModal({ line, current, onSave, onClose }){
   );
 }
 
-function ProductCard({ line, lk, state, readOnly, onConforme, onEcart, onNonRecu }){
+// Saisie d'un SURPLUS : quantité reçue supérieure à l'attendu.
+function SurplusModal({ line, current, onSave, onClose }){
+  const [val,setVal]=useState(current && current.reel!=null ? String(current.reel) : "");
+  const [txt,setTxt]=useState(current?.ecartText||"");
+  const [err,setErr]=useState("");
+  const cdt=line.cdt||null;
+  const save=()=>{
+    setErr("");
+    const v=toNum(val);
+    if(v<=0){ setErr("Indique la quantité réellement reçue."); return; }
+    if(v<=line.attendu){ setErr("Pour un surplus, la quantité reçue doit être SUPÉRIEURE à l'attendu ("+line.attendu+"). Sinon utilise « Reçu conforme » ou « Non conforme »."); return; }
+    onSave({ reel:v, surplus:v-line.attendu, ecartText:txt.trim() });
+  };
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <h3>➕ Reçu en plus</h3>
+        <div className="sub">{line.designation}<br/>Attendu : <b>{line.attendu}</b>{cdt?` pièces (colis de ${cdt})`:""}</div>
+        <div className="field">
+          <label>Quantité RÉELLEMENT reçue (en unités)</label>
+          <input inputMode="numeric" autoFocus value={val} onChange={e=>setVal(e.target.value.replace(/[^0-9.,]/g,""))} placeholder={"plus de "+line.attendu}/>
+          <div className="small-note">{toNum(val)>line.attendu?`→ ${toNum(val)-line.attendu} en plus${cdt?` · ${toNum(val)/cdt} colis`:""}`:""}</div>
+        </div>
+        <div className="field">
+          <label>Remarque (optionnel)</label>
+          <textarea rows={2} value={txt} onChange={e=>setTxt(e.target.value)} placeholder="Précisions…"></textarea>
+        </div>
+        {err && <div className="err" style={{textAlign:"left"}}>{err}</div>}
+        <div className="modal-actions">
+          <button className="btn-cancel" onClick={onClose}>Annuler</button>
+          <button className="btn-confirm" onClick={save}>Enregistrer</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Affiche TOUTE la désignation + toutes les infos de la ligne (utile quand le texte est long).
+function DetailModal({ line, onClose }){
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <h3>Détail article</h3>
+        <div style={{fontSize:18,fontWeight:800,lineHeight:1.35,margin:"4px 0 14px",wordBreak:"break-word"}}>{line.designation}</div>
+        <div className="recap-stat"><span className="label">Attendu</span><span className="value">{line.cdt?`${line.attendu/line.cdt} colis (${line.attendu} u · colis de ${line.cdt})`:line.attendu}</span></div>
+        {line.article && <div className="recap-stat"><span className="label">Code article</span><span className="value">{line.article}</span></div>}
+        {line.ean && <div className="recap-stat"><span className="label">EAN</span><span className="value">{line.ean}</span></div>}
+        {line.marque && <div className="recap-stat"><span className="label">Marque</span><span className="value">{line.marque}</span></div>}
+        {line.poidsVariable && <div className="recap-stat"><span className="label">Poids variable</span><span className="value">Oui ⚖️</span></div>}
+        <button className="btn-primary" style={{marginTop:14}} onClick={onClose}>Fermer</button>
+      </div>
+    </div>
+  );
+}
+
+function ProductCard({ line, lk, state, readOnly, onConforme, onEcart, onNonRecu, onSurplus, onDetail }){
   const st=state||{};
   let cls="product-card";
   if(st.status==="conforme") cls+=" conforme";
   else if(st.status==="ecart") cls+=" ecart";
   else if(st.status==="nonrecu") cls+=" nonrecu";
+  else if(st.status==="surplus") cls+=" surplus";
   return (
     <div className={cls}>
-      <div className="designation">{line.designation}</div>
+      <div className="designation">{line.designation}
+        <button className="info-btn" onClick={onDetail} title="Voir toute la désignation et le détail">ⓘ détail</button>
+      </div>
       <div className="product-meta">
         {line.cdt
           ? <span className="attendu-pill"><b style={{fontSize:22}}>{line.attendu/line.cdt}</b> colis <span style={{color:"#888",fontSize:11,fontWeight:600}}>(quantité : {line.attendu} · colis de {line.cdt})</span></span>
@@ -1036,6 +1136,7 @@ function ProductCard({ line, lk, state, readOnly, onConforme, onEcart, onNonRecu
             <button className={"btn-nonconf"+(st.status==="ecart"?" on":"")} onClick={onEcart}>Non conforme</button>
             <button className={"btn-nonrecu"+(st.status==="nonrecu"?" on":"")} onClick={onNonRecu}>Pas reçu</button>
           </div>
+          <button className={"btn-surplus"+(st.status==="surplus"?" on":"")} onClick={onSurplus}>➕ Reçu en plus</button>
         </div>
       )}
       {st.status && (
@@ -1044,8 +1145,10 @@ function ProductCard({ line, lk, state, readOnly, onConforme, onEcart, onNonRecu
             ? <span>✓ Conforme{line.poidsVariable ? <> — poids reçu <b>{st.poids} kg</b></> : <> — <b>{line.cdt?(st.reel/line.cdt):st.reel}</b> {line.cdt?"colis":"reçu"}</>}</span>
             : st.status==="nonrecu"
               ? <span>✗ <b>Pas reçu</b> — 0 sur {line.attendu} attendu(s)</span>
-              : <span>⚠ {motifLabel(st.motif)}{st.avoir?" (avoir)":""} — apte vente : <b>{st.aptevente!=null?st.aptevente:st.reel}</b>{line.poidsVariable&&st.poids?` · poids ${st.poids} kg`:""}{st.ecartText?" — "+st.ecartText:""}
-                {st.photoUrl && <a href={st.photoUrl} target="_blank" rel="noreferrer" style={{marginLeft:8}}>📷 photo</a>}</span>}
+              : st.status==="surplus"
+                ? <span>➕ <b>Reçu en plus</b> — <b>{st.reel}</b> reçu{line.cdt?` (${st.reel/line.cdt} colis)`:""} pour {line.attendu} attendu <b>(+{st.surplus})</b>{st.ecartText?" — "+st.ecartText:""}</span>
+                : <span>⚠ {motifLabel(st.motif)}{st.avoir?" (avoir)":""} — apte vente : <b>{st.aptevente!=null?st.aptevente:st.reel}</b>{line.poidsVariable&&st.poids?` · poids ${st.poids} kg`:""}{st.ecartText?" — "+st.ecartText:""}
+                  {st.photoUrl && <a href={st.photoUrl} target="_blank" rel="noreferrer" style={{marginLeft:8}}>📷 photo</a>}</span>}
         </div>
       )}
     </div>
@@ -1059,6 +1162,8 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
   const [search,setSearch]=useState("");
   const [ecartFor,setEcartFor]=useState(null); // {line, lk}
   const [poidsFor,setPoidsFor]=useState(null); // {line, lk} pour poids variable conforme
+  const [surplusFor,setSurplusFor]=useState(null); // {line, lk} pour "reçu en plus"
+  const [detailFor,setDetailFor]=useState(null); // line pour la modale détail (désignation complète)
   const [toast,setToast]=useState("");
   const [scanOpen,setScanOpen]=useState(false); // scanner code-barres
   const [showDone,setShowDone]=useState(false); // encart "Réceptionné" replié
@@ -1127,6 +1232,11 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
       article:line.article, ean:line.ean||"", designation:line.designation, attendu:line.attendu });
     setToast("Pas reçu : "+line.designation); setTimeout(()=>setToast(""),1200);
   };
+  const saveSurplus=(line,lk,data)=>{
+    persistLine(lk,{ status:"surplus", motif:"surplus", reel:data.reel, surplus:data.surplus, ecartText:data.ecartText||"",
+      article:line.article, ean:line.ean||"", designation:line.designation, attendu:line.attendu });
+    setSurplusFor(null); setToast("Reçu en plus : "+line.designation); setTimeout(()=>setToast(""),1200);
+  };
 
   const filtered=useMemo(()=>{
     const q=norm(search);
@@ -1140,7 +1250,7 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
   },[search,activeLines]);
 
   const doneCount = activeLines.reduce((n,l,i)=> n + (lineStates[lineKey(l,i)]?.status?1:0), 0);
-  const ecartCount = activeLines.reduce((n,l,i)=> { const s=lineStates[lineKey(l,i)]?.status; return n + (s==="ecart"||s==="nonrecu"?1:0); }, 0);
+  const ecartCount = activeLines.reduce((n,l,i)=> { const s=lineStates[lineKey(l,i)]?.status; return n + (s==="ecart"||s==="nonrecu"||s==="surplus"?1:0); }, 0);
 
   // Liste simple (SANS tri par catégorie) : uniquement les lignes non encore pointées.
   const todo = useMemo(()=> filtered.filter(l=> !lineStates[lineKey(l,activeLines.indexOf(l))]?.status), [filtered,lineStates,activeLines]);
@@ -1150,8 +1260,9 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
     <div className="app">
       <div className="header"><div className="header-row">
         <div><h1>{doc.supplier||"BL"} {doc.docNumber}</h1>
-          <div className="sub">{readOnly?"Réception validée (lecture seule)":"Pointage en cours"}</div></div>
-        <button className="header-btn" onClick={onExit}>Accueil</button>
+          <div className="sub">{readOnly?"Réception validée (lecture seule)":"Pointage en cours"}
+            {doc.commandes && doc.commandes.length>0 && <> · Commande(s) : {doc.commandes.join(" + ")}</>}</div></div>
+        <button className="header-btn" onClick={onExit}>← Retour</button>
       </div></div>
 
       <div className="search-bar" style={{display:"flex",gap:8}}>
@@ -1165,7 +1276,8 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
       <div className="product-list">
         {todo.map((l,i)=>{ const lk=lineKey(l, activeLines.indexOf(l));
           return <ProductCard key={lk+"_"+i} line={l} lk={lk} state={lineStates[lk]} readOnly={readOnly}
-            onConforme={()=>setConforme(l,lk)} onEcart={()=>setEcartFor({line:l,lk})} onNonRecu={()=>setNonRecu(l,lk)}/>;
+            onConforme={()=>setConforme(l,lk)} onEcart={()=>setEcartFor({line:l,lk})} onNonRecu={()=>setNonRecu(l,lk)}
+            onSurplus={()=>setSurplusFor({line:l,lk})} onDetail={()=>setDetailFor(l)}/>;
         })}
         {todo.length===0 && <div className="small-note" style={{padding:16}}>{doneList.length>0?"Tout est pointé ✓ — vérifie l'encart Réceptionné puis valide.":"Aucun article à pointer."}</div>}
 
@@ -1176,13 +1288,16 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
               <span className="cat-count"><span className="chev">{showDone?"▾":"▸"}</span></span>
             </button>
             {showDone && doneList.map((l)=>{ const lk=lineKey(l,activeLines.indexOf(l)); const st=lineStates[lk]||{};
-              const clsx="product-card "+(st.status==="conforme"?"conforme":st.status==="nonrecu"?"nonrecu":"ecart");
+              const clsx="product-card "+(st.status==="conforme"?"conforme":st.status==="nonrecu"?"nonrecu":st.status==="surplus"?"surplus":"ecart");
               return (
                 <div key={"d"+lk} className={clsx}>
-                  <div className="designation">{l.designation}</div>
+                  <div className="designation">{l.designation}
+                    <button className="info-btn" onClick={()=>setDetailFor(l)} title="Voir toute la désignation">ⓘ détail</button>
+                  </div>
                   <div className="line-state">
                     {st.status==="conforme"?<span>✓ Conforme{l.poidsVariable?<> — <b>{st.poids} kg</b></>:<> — <b>{l.cdt?(st.reel/l.cdt):st.reel}</b> {l.cdt?"colis":""}</>}</span>
                      :st.status==="nonrecu"?<span>✗ <b>Pas reçu</b></span>
+                     :st.status==="surplus"?<span>➕ <b>Reçu en plus</b> — <b>{st.reel}</b> reçu pour {l.attendu} (+{st.surplus})</span>
                      :<span>⚠ {motifLabel(st.motif)}{st.avoir?" (avoir)":""} — apte vente <b>{st.aptevente!=null?st.aptevente:st.reel}</b>{st.ecartText?" — "+st.ecartText:""}{st.photoUrl && <a href={st.photoUrl} target="_blank" rel="noreferrer" style={{marginLeft:8}}>📷</a>}</span>}
                   </div>
                   {!readOnly && <button className="btn-secondary" style={{marginTop:8}} onClick={()=>clearLine(lk)}>Corriger</button>}
@@ -1206,6 +1321,9 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
         onSave={(data)=>saveEcart(ecartFor.line, ecartFor.lk, data)} onClose={()=>setEcartFor(null)}/>}
       {poidsFor && <PoidsModal line={poidsFor.line} current={lineStates[poidsFor.lk]}
         onSave={(p)=>savePoids(poidsFor.line, poidsFor.lk, p)} onClose={()=>setPoidsFor(null)}/>}
+      {surplusFor && <SurplusModal line={surplusFor.line} current={lineStates[surplusFor.lk]}
+        onSave={(data)=>saveSurplus(surplusFor.line, surplusFor.lk, data)} onClose={()=>setSurplusFor(null)}/>}
+      {detailFor && <DetailModal line={detailFor} onClose={()=>setDetailFor(null)}/>}
 
       <div className="bottom-bar">
         <div className="stats">
@@ -1324,19 +1442,26 @@ function AdminLoad(){
   const [docType,setDocType]=useState("BL");
   const [deliveryDate,setDeliveryDate]=useState("");
   const [err,setErr]=useState(""); const [busy,setBusy]=useState(false); const [msg,setMsg]=useState("");
+  const [fileCount,setFileCount]=useState(0);
   const fileRef=useRef();
   const fmtFr=(iso)=>{ if(!iso) return ""; const [y,m,d]=iso.split("-"); return d+"/"+m+"/"+y; };
 
+  // Accepte PLUSIEURS fichiers d'un coup, et permet aussi d'AJOUTER un fichier au document en cours.
+  // Cas type : commande frais + commande sec = 2 bons de commande, mais 1 seul BL commun.
   const onFile=async(e)=>{
-    const f=e.target.files&&e.target.files[0]; if(!f) return;
+    const files=Array.from(e.target.files||[]); if(!files.length) return;
     setErr(""); setMsg(""); setBusy(true);
     try{
-      const r=await parseAnyFile(f);
-      if(!r.lines.length){ setErr("Aucune ligne détectée. Vérifie le format du fichier."); setBusy(false); return; }
-      setParsed(r); if(r.supplier) setSupplier(r.supplier);
+      const results=[];
+      for(const f of files){ results.push(await parseAnyFile(f)); }
+      const merged=mergeParsed(parsed ? [parsed, ...results] : results);
+      if(!merged.lines.length){ setErr("Aucune ligne détectée. Vérifie le format du/des fichier(s)."); }
+      else { setParsed(merged); if(merged.supplier && !supplier) setSupplier(merged.supplier); setFileCount(c=>c+files.length); }
     }catch(ex){ setErr("Erreur lecture : "+ex.message); }
+    if(fileRef.current) fileRef.current.value=""; // autorise re-sélection / ajout du même type
     setBusy(false);
   };
+  const resetLoad=()=>{ setParsed(null); setSupplier(""); setDeliveryDate(""); setFileCount(0); setErr(""); setMsg(""); if(fileRef.current) fileRef.current.value=""; };
 
   const save=async()=>{
     if(!parsed) return; if(!db){ setErr("Firebase non configuré."); return; }
@@ -1345,9 +1470,10 @@ function AdminLoad(){
       const ref=db.ref("documents").push();
       await ref.set({ docNumber:parsed.docNumber||"(sans n°)", supplier:supplier.trim()||"(fournisseur ?)",
         type:docType, format:parsed.format, deliveryDate:fmtFr(deliveryDate),
+        commandes:parsed.commandes||[], fileCount:fileCount||1,
         createdAt:firebase.database.ServerValue.TIMESTAMP, lines:parsed.lines });
       setMsg("Document chargé ✓ Il est visible par le magasin.");
-      setParsed(null); setSupplier(""); setDeliveryDate(""); if(fileRef.current) fileRef.current.value="";
+      resetLoad();
     }catch(ex){ setErr("Erreur enregistrement : "+ex.message); }
     setBusy(false);
   };
@@ -1356,10 +1482,11 @@ function AdminLoad(){
     <div className="list-wrap">
       <div className="upload-zone" onClick={()=>fileRef.current&&fileRef.current.click()}>
         <div className="icon">⬆️</div>
-        <div className="label">Charger un fichier BL</div>
-        <div className="hint">CSV (Elibio), TXT tabulé, ou PDF (Vitafrais)</div>
-        <input ref={fileRef} type="file" accept=".csv,.txt,.pdf" style={{display:"none"}} onChange={onFile}/>
+        <div className="label">{parsed?"➕ Ajouter un autre fichier (fusion)":"Charger le(s) fichier(s) BL"}</div>
+        <div className="hint">CSV (Elibio), TXT tabulé, ou PDF (Vitafrais / Biodis)<br/>Plusieurs fichiers possibles → fusionnés en 1 seul document (ex : commande frais + sec, 1 BL commun)</div>
+        <input ref={fileRef} type="file" accept=".csv,.txt,.pdf" multiple style={{display:"none"}} onChange={onFile}/>
       </div>
+      {fileCount>1 && <div className="small-note" style={{color:"#1a4d2e",fontWeight:700}}>📎 {fileCount} fichiers fusionnés en 1 document.</div>}
       {busy && <div className="small-note">Lecture…</div>}
       {err && <div className="err" style={{textAlign:"left"}}>{err}</div>}
       {msg && <div style={{color:"#2e7d32",fontWeight:600,margin:"10px 0"}}>{msg}</div>}
@@ -1373,7 +1500,13 @@ function AdminLoad(){
               <option>BL</option><option>Facture</option><option>Doc</option></select></div>
           <div className="field"><label>Livraison prévue (date)</label>
             <input type="date" value={deliveryDate} onChange={e=>setDeliveryDate(e.target.value)}/></div>
-          <div className="small-note">N° détecté : <b>{parsed.docNumber||"—"}</b> · Format : {parsed.format} · {parsed.lines.length} lignes{parsed.skipped?` · ${parsed.skipped} ligne(s) ignorée(s)`:""}</div>
+          {parsed.commandes && parsed.commandes.length>0 && (
+            <div className="field"><label>Commande(s) rattachée(s) à ce BL</label>
+              <div>{parsed.commandes.map((c,i)=><span key={i} className="cmd-pill" style={{marginRight:6}}>{c}</span>)}</div>
+              <div className="small-note">Détecté(s) automatiquement — un seul BL peut couvrir plusieurs commandes (frais + sec).</div>
+            </div>
+          )}
+          <div className="small-note">N° BL détecté : <b>{parsed.docNumber||"—"}</b> · Format : {parsed.format} · {parsed.lines.length} lignes{parsed.skipped?` · ${parsed.skipped} ligne(s) ignorée(s)`:""}</div>
           <div style={{maxHeight:300,overflow:"auto",marginTop:10,border:"1px solid #e6e8ec",borderRadius:8}}>
             <table className="prev-table"><thead><tr><th>Article</th><th>Désignation</th><th>EAN</th><th>Attendu</th></tr></thead>
               <tbody>{parsed.lines.slice(0,300).map((l,i)=>(
@@ -1381,6 +1514,7 @@ function AdminLoad(){
                   <td>{l.article}</td><td>{l.designation}</td><td>{l.ean}</td><td>{l.nonLivre?"(non livré)":l.attendu}</td></tr>))}</tbody></table>
           </div>
           <button className="btn-primary" style={{marginTop:12}} onClick={save} disabled={busy}>Enregistrer ce document</button>
+          <button className="btn-secondary" onClick={resetLoad} disabled={busy}>Repartir de zéro</button>
           <div className="small-note">Rappel CDC : les prix d'achat ne sont jamais enregistrés ni affichés côté magasin.</div>
         </div>
       )}
@@ -1523,6 +1657,25 @@ function App(){
   const { latest, updateAvailable }=useVersionCheck();
 
   useEffect(()=>{ if(!db) return; const r=db.ref("broadcasts"); const cb=s=>setBroadcasts(s.val()||{}); r.on("value",cb); return ()=>r.off("value",cb); },[]);
+
+  // >>> Piège le bouton "retour" du téléphone / navigateur <<<
+  // Avant : un "retour" quittait l'app → il fallait re-saisir le code (déconnexion involontaire).
+  // Maintenant : le "retour" navigue EN INTERNE (recap → réception → accueil) sans jamais quitter.
+  const viewRef=useRef(view); useEffect(()=>{ viewRef.current=view; },[view]);
+  useEffect(()=>{
+    const push=()=>{ try{ window.history.pushState({pribon:true},""); }catch(e){} };
+    push(); // on garde toujours un cran d'avance dans l'historique
+    const onPop=()=>{
+      push(); // ré-empile aussitôt => l'app ne se ferme jamais sur "retour"
+      const v=viewRef.current;
+      if(v==="recap") setView("reception");
+      else if(v==="reception"){ setCtx({}); setView("home"); }
+      else if(v==="admin") setView("login");
+      // home / login : le retour ne fait rien (surtout : PAS de déconnexion)
+    };
+    window.addEventListener("popstate", onPop);
+    return ()=>window.removeEventListener("popstate", onPop);
+  },[]);
 
   const doLogout=()=>{
     if(operator) releaseSession(operator.code, operator.sessionId);
