@@ -226,7 +226,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
 // Version de l'app (voir VERSIONS.md). Affichée en bas + comparée à la version
 // canonique renvoyée par l'Apps Script (get-version) pour proposer la mise à jour.
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.2.0";
 
 // >>> À REMPLIR avec la config de TON projet Firebase PRIBON (voir README) <<<
 /* ===== Magasins (multi-magasins) — MÊME code pour tous, config Firebase par magasin ===== */
@@ -367,7 +367,7 @@ async function uploadPhotoToDrive(file){
 const nowISO = () => new Date().toISOString();
 function norm(s){ return (s||"").toString().normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase().trim(); }
 function toNum(s){ if(s==null) return 0; const n=parseFloat(String(s).replace(/\s/g,"").replace(",",".")); return isNaN(n)?0:n; }
-function lineKey(p, idx){ const a=(p.article||"").toString().trim(); return a ? "a_"+a.replace(/[.#$/\[\]]/g,"_") : "i_"+idx; }
+function lineKey(p, idx){ if(p && p._lk) return p._lk; const a=(p.article||"").toString().trim(); return a ? "a_"+a.replace(/[.#$/\[\]]/g,"_") : "i_"+idx; }
 function fmtDate(ts){ if(!ts) return ""; const d=new Date(ts); return d.toLocaleDateString("fr-FR")+" "+d.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}); }
 
 /* ============================== PARSEURS ============================== */
@@ -420,7 +420,11 @@ function parseTXT(text){
 
 function parsePDFLines(rowLines){
   const out=[]; let supplier=""; let docNumber=""; const commandes=[];
-  const lineRe=/^(\d{2,7})\s+(.*\S)\s+(\d{8,13})\s+(\d+)\s+[\d.,]+\s+[\d.,]+\s*$/;
+  // Vitafrais : Code | Désignation+Marque | COLIS livrés | PCB (pièces/colis) | EAN | Qté(total) | Poids | [PU HT]
+  //   -> cdt = PCB (colisage) ; qteCmd = colis livrés ; attendu = Qté totale (pièces) = colis × PCB.
+  const reColis=/^(\d{2,7})\s+(.*\S)\s+(\d+)\s+(\d+)\s+(\d{8,13})\s+(\d+)\s+[\d.,]+(?:\s+[\d.,]+)?\s*$/;
+  // Repli (ancien format, sans colonnes colis/PCB) : Code | Désignation | EAN | Qté | poids | PU.
+  const reSimple=/^(\d{2,7})\s+(.*\S)\s+(\d{8,13})\s+(\d+)\s+[\d.,]+\s+[\d.,]+\s*$/;
   for(const L of rowLines){
     if(!supplier && /VITAFRAIS/i.test(L)) supplier="VITAFRAIS";
     const mBL=L.match(/n[°º]\s*BL\s*:?\s*(\d+)/i); if(mBL) docNumber=mBL[1];
@@ -428,9 +432,21 @@ function parsePDFLines(rowLines){
     const mCmd=L.match(/Commande\(s\)\s*:?\s*(.+)$/i);
     if(mCmd){ (mCmd[1].match(/\d{6,}(?:\(\d+\))?/g)||[]).forEach(x=>{ if(!commandes.includes(x)) commandes.push(x); }); }
     if(/^(Palette|Colis \d|Poids|Total|Distribution|Page|Commande|BIO :|DEM :)/i.test(L)) continue;
-    const m=L.match(lineRe); if(!m) continue;
-    out.push({ article:m[1], ean:m[3].replace(/^0+(?=\d)/,""),
-               designation:m[2].replace(/\s+\d+$/,"").trim(), marque:"", attendu:parseInt(m[4],10), categorie:"Autres" });
+    let m=L.match(reColis);
+    if(m){
+      const colis=parseInt(m[3],10), pcb=parseInt(m[4],10), qte=parseInt(m[6],10);
+      const cdt = pcb>0 ? pcb : null;
+      let qteCmd = colis>0 ? colis : (cdt?Math.round(qte/cdt):qte);
+      if(cdt && colis*pcb!==qte && qte%pcb===0) qteCmd=qte/pcb;   // cohérence colis × PCB = Qté
+      out.push({ article:m[1], ean:m[5].replace(/^0+(?=\d)/,""), designation:m[2].trim(), marque:"",
+                 cdt, qteCmd, unit: cdt?"colis":"piece", attendu:qte, categorie:"Autres" });
+      continue;
+    }
+    m=L.match(reSimple);
+    if(m){
+      out.push({ article:m[1], ean:m[3].replace(/^0+(?=\d)/,""),
+                 designation:m[2].replace(/\s+\d+$/,"").trim(), marque:"", attendu:parseInt(m[4],10), categorie:"Autres" });
+    }
   }
   return { docNumber, supplier, lines: out, commandes };
 }
@@ -560,7 +576,10 @@ function mergeParsed(list){
     (r.lines||[]).forEach(l=>{
       if(l.nonLivre){ nonLivres.push(l); return; }
       const k=(l.article||"").trim() || ("ean_"+(l.ean||"")) || ("des_"+norm(l.designation));
-      if(map.has(k)){ const e=map.get(k); e.attendu=(e.attendu||0)+(l.attendu||0); }
+      if(map.has(k)){ const e=map.get(k); e.attendu=(e.attendu||0)+(l.attendu||0);
+        // Récupère le colisage depuis le fichier qui le porte (ex. commande sans cdt + BL avec cdt).
+        if((e.cdt==null) && l.cdt!=null){ e.cdt=l.cdt; e.qteCmd=l.qteCmd; e.unit=l.unit||"colis"; }
+      }
       else { map.set(k, {...l}); order.push(k); }
     });
     if(r.docNumber) docNums.push(r.docNumber);
@@ -1194,6 +1213,42 @@ function DetailModal({ line, onClose }){
   );
 }
 
+// Ajout d'un produit REÇU EN PLUS, hors BL (en réception tout est en quantité / pièces).
+function AddProductModal({ onSave, onClose }){
+  const [designation,setDesignation]=useState("");
+  const [qte,setQte]=useState("");
+  const [article,setArticle]=useState("");
+  const [ean,setEan]=useState("");
+  const [err,setErr]=useState("");
+  const save=()=>{
+    const des=designation.trim(); const q=toNum(qte);
+    if(!des){ setErr("Indique la désignation du produit."); return; }
+    if(!(q>0)){ setErr("Indique la quantité reçue (en pièces)."); return; }
+    onSave({ designation:des, qte:q, article:article.trim(), ean:ean.trim() });
+  };
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <h3>➕ Produit reçu en plus (hors BL)</h3>
+        <div className="sub" style={{marginBottom:10}}>Pour un produit livré mais absent du BL. En réception, la quantité est en <b>pièces</b>.</div>
+        <div className="field"><label>Désignation *</label>
+          <input value={designation} onChange={e=>setDesignation(e.target.value)} placeholder="Ex : YAOURT NATURE 4X125G…" autoFocus/></div>
+        <div className="field"><label>Quantité reçue (pièces) *</label>
+          <input inputMode="numeric" value={qte} onChange={e=>setQte(e.target.value.replace(/[^0-9.,]/g,""))} placeholder="0"/></div>
+        <div className="field"><label>Code article (optionnel)</label>
+          <input value={article} onChange={e=>setArticle(e.target.value)} placeholder="Code interne / réf."/></div>
+        <div className="field"><label>EAN (optionnel)</label>
+          <input inputMode="numeric" value={ean} onChange={e=>setEan(e.target.value.replace(/[^0-9]/g,""))} placeholder="Code-barres"/></div>
+        {err && <div className="err" style={{textAlign:"left"}}>{err}</div>}
+        <div className="modal-actions">
+          <button className="btn-cancel" onClick={onClose}>Annuler</button>
+          <button className="btn-confirm" onClick={save}>Ajouter</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProductCard({ line, lk, state, readOnly, onConforme, onEcart, onNonRecu, onSurplus, onDetail }){
   const st=state||{};
   let cls="product-card";
@@ -1255,10 +1310,24 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
   const [toast,setToast]=useState("");
   const [scanOpen,setScanOpen]=useState(false); // scanner code-barres
   const [showDone,setShowDone]=useState(false); // encart "Réceptionné" replié
+  const [addProdOpen,setAddProdOpen]=useState(false); // ajout d'un produit hors BL
   const readOnly = reception && reception.status==="validated";
 
   const activeLines = useMemo(()=> (doc.lines||[]).filter(l=>!l.nonLivre), [doc]);
   const nonLivres = useMemo(()=> (doc.lines||[]).filter(l=>l.nonLivre), [doc]);
+  // Produits AJOUTÉS hors BL (reçus en plus) : dérivés des lignes 'x_' de la réception → live pour tous les vendeurs.
+  const addedLines = useMemo(()=> Object.entries(lineStates)
+    .filter(([lk,s])=> lk.indexOf("x_")===0 && s)
+    .map(([lk,s])=> ({ _lk:lk, article:s.article||"", ean:s.ean||"", designation:s.designation||"(produit ajouté)",
+      attendu:(s.attendu!=null?s.attendu:(s.reel!=null?s.reel:0)), cdt:null, horsCommande:true, poidsVariable:false })),
+    [lineStates]);
+  const allLines = useMemo(()=> [...activeLines, ...addedLines], [activeLines, addedLines]);
+
+  // Confirmation de sortie (évite de quitter la réception sans faire exprès). Rien n'est perdu : pointage enregistré.
+  const requestExit=()=>{
+    if(readOnly){ onExit(); return; }
+    if(window.confirm("Quitter la réception en cours ?\n\nLe pointage déjà saisi est enregistré : tu pourras la reprendre.")) onExit();
+  };
 
   // Crée le draft si nécessaire
   useEffect(()=>{ let cancelled=false;
@@ -1325,6 +1394,12 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
       article:line.article, ean:line.ean||"", designation:line.designation, attendu:line.attendu });
     setSurplusFor(null); setToast("Reçu en plus : "+line.designation); setTimeout(()=>setToast(""),1200);
   };
+  const addProduct=(data)=>{
+    const lk="x_"+Date.now().toString(36)+Math.floor(Math.random()*1000);
+    persistLine(lk,{ status:"conforme", horsCommande:true, reel:data.qte, attendu:data.qte,
+      article:data.article||"", ean:data.ean||"", designation:data.designation });
+    setAddProdOpen(false); setToast("Produit hors BL ajouté : "+data.designation); setTimeout(()=>setToast(""),1400);
+  };
 
   const filtered=useMemo(()=>{
     const q=norm(search);
@@ -1342,7 +1417,7 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
 
   // Liste simple (SANS tri par catégorie) : uniquement les lignes non encore pointées.
   const todo = useMemo(()=> filtered.filter(l=> !lineStates[lineKey(l,activeLines.indexOf(l))]?.status), [filtered,lineStates,activeLines]);
-  const doneList = useMemo(()=> activeLines.filter(l=> lineStates[lineKey(l,activeLines.indexOf(l))]?.status), [activeLines,lineStates]);
+  const doneList = useMemo(()=> allLines.filter(l=> lineStates[lineKey(l,activeLines.indexOf(l))]?.status), [allLines,activeLines,lineStates]);
 
   return (
     <div className="app">
@@ -1350,7 +1425,7 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
         <div><h1>{doc.supplier||"BL"} {doc.docNumber}</h1>
           <div className="sub">{readOnly?"Réception validée (lecture seule)":"Pointage en cours"}
             {doc.commandes && doc.commandes.length>0 && <> · Commande(s) : {doc.commandes.join(" + ")}</>}</div></div>
-        <button className="header-btn" onClick={onExit}>← Retour</button>
+        <button className="header-btn" onClick={requestExit}>← Retour</button>
       </div></div>
 
       <div className="search-bar" style={{display:"flex",gap:8}}>
@@ -1358,8 +1433,14 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
         {!readOnly && <button className="header-btn" style={{background:"#1a4d2e",color:"#fff",padding:"0 14px",fontSize:20,borderRadius:8}} onClick={()=>setScanOpen(true)} title="Scanner un code-barres">📷</button>}
         {search && <button className="header-btn" style={{background:"#eef2f7",color:"#333"}} onClick={()=>setSearch("")}>✕</button>}
       </div>
+      {!readOnly && (
+        <div style={{padding:"8px 12px 0"}}>
+          <button className="btn-secondary" style={{width:"100%",background:"#eef7f0",color:"#1a4d2e",fontWeight:700}} onClick={()=>setAddProdOpen(true)}>➕ Ajouter un produit reçu en plus (hors BL)</button>
+        </div>
+      )}
 
       {scanOpen && <ScanModal onCode={(code)=>{ setSearch(code); setScanOpen(false); }} onClose={()=>setScanOpen(false)}/>}
+      {addProdOpen && <AddProductModal onSave={addProduct} onClose={()=>setAddProdOpen(false)}/>}
 
       <div className="product-list">
         {todo.map((l,i)=>{ const lk=lineKey(l, activeLines.indexOf(l));
@@ -1417,10 +1498,11 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
         <div className="stats">
           <span>Pointés : {doneCount}/{activeLines.length}</span>
           <span>Écarts : {ecartCount}</span>
+          {addedLines.length>0 && <span>Hors BL : {addedLines.length}</span>}
         </div>
         {readOnly
           ? <button className="btn-finish" onClick={onExit}>Retour accueil</button>
-          : <button className="btn-finish" onClick={()=>onGoRecap({ id:recId, lineStates, activeLines })}>Voir le récapitulatif</button>}
+          : <button className="btn-finish" onClick={()=>onGoRecap({ id:recId, lineStates, activeLines:allLines })}>Voir le récapitulatif</button>}
       </div>
 
       {toast && <div className="toast">{toast}</div>}
@@ -1635,14 +1717,40 @@ function AdminReceptions(){
     XLSX.writeFile(wb, "receptions_"+STORE.code+"_"+new Date().toISOString().slice(0,10)+".xlsx");
   };
 
+  // Suppression d'une réception résiduelle (draft jamais validé, ou validée déjà saisie sur G5).
+  const del=async(e,r)=>{
+    e.stopPropagation();
+    if(!db) return;
+    const quoi = r.status==="validated" ? "Cette réception est VALIDÉE. La supprimer ici" : "Supprimer cette réception en cours";
+    if(!confirm(quoi+" ?\n\n"+(r.supplier||"")+" "+(r.docNumber||"")+"\n\nAction définitive.")) return;
+    try{ await db.ref("receptions/"+r.id).remove(); }catch(ex){ alert("Erreur suppression : "+ex.message); }
+  };
+  // Purge des réceptions VALIDÉES de plus de 30 jours (nettoyage des résidus).
+  const purgeOld=async()=>{
+    if(!db) return;
+    const cutoff=Date.now()-30*24*3600*1000;
+    const old=recs.filter(r=>r.status==="validated" && (r.validatedAt||r.createdAt||0)<cutoff);
+    if(!old.length){ alert("Aucune réception validée de plus de 30 jours."); return; }
+    if(!confirm("Supprimer "+old.length+" réception(s) validée(s) de plus de 30 jours ?\n\nAction définitive.")) return;
+    try{ for(const r of old){ await db.ref("receptions/"+r.id).remove(); } }catch(ex){ alert("Erreur purge : "+ex.message); }
+  };
+
   if(sel) return <AdminRecDetail rec={sel} onBack={()=>setSel(null)}/>;
+  const drafts=recs.filter(r=>r.status!=="validated").length;
   return (
     <div className="list-wrap">
-      <button className="btn-secondary" onClick={exportXLSX} style={{marginBottom:10}}>⬇️ Exporter Excel (Ecarts + Réceptions)</button>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
+        <button className="btn-secondary" onClick={exportXLSX}>⬇️ Exporter Excel (Ecarts + Réceptions)</button>
+        <button className="btn-secondary" style={{background:"#fdecea",color:"#c62828"}} onClick={purgeOld}>🧹 Purger les validées &gt; 30 j</button>
+      </div>
+      {drafts>0 && <div className="small-note" style={{color:"#e65100"}}>⚠ {drafts} réception(s) en cours (non validée). Supprime les résidus avec 🗑.</div>}
       {recs.length===0 && <div className="small-note">Aucune réception.</div>}
       {recs.map(r=>(
         <div key={r.id} className="doc-card" onClick={()=>setSel(r)}>
-          <div className="t">{r.supplier} {r.docNumber}</div>
+          <div className="t" style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+            <span>{r.supplier} {r.docNumber}</span>
+            <button className="header-btn" style={{background:"#fdecea",color:"#c62828",flex:"0 0 auto"}} onClick={(e)=>del(e,r)} title="Supprimer cette réception">🗑</button>
+          </div>
           <div className="m">
             <span className={"badge "+(r.status==="validated"?"valid":"draft")}>{r.status==="validated"?"Validée":"En cours"}</span>
             <span>{r.storeLabel}</span>
@@ -1750,6 +1858,7 @@ function App(){
   // Avant : un "retour" quittait l'app → il fallait re-saisir le code (déconnexion involontaire).
   // Maintenant : le "retour" navigue EN INTERNE (recap → réception → accueil) sans jamais quitter.
   const viewRef=useRef(view); useEffect(()=>{ viewRef.current=view; },[view]);
+  const ctxRef=useRef(ctx); useEffect(()=>{ ctxRef.current=ctx; },[ctx]);
   useEffect(()=>{
     const push=()=>{ try{ window.history.pushState({pribon:true},""); }catch(e){} };
     push(); // on garde toujours un cran d'avance dans l'historique
@@ -1757,7 +1866,12 @@ function App(){
       push(); // ré-empile aussitôt => l'app ne se ferme jamais sur "retour"
       const v=viewRef.current;
       if(v==="recap") setView("reception");
-      else if(v==="reception"){ setCtx({}); setView("home"); }
+      else if(v==="reception"){
+        // Confirmation de sortie (évite de quitter la réception sans faire exprès).
+        // Le pointage est enregistré ligne par ligne dans Firebase : rien n'est perdu, on peut reprendre.
+        const ro = ctxRef.current && ctxRef.current.reception && ctxRef.current.reception.status==="validated";
+        if(ro || window.confirm("Quitter la réception en cours ?\n\nLe pointage déjà saisi est enregistré : tu pourras la reprendre.")){ setCtx({}); setView("home"); }
+      }
       else if(v==="admin") setView("login");
       // home / login : le retour ne fait rien (surtout : PAS de déconnexion)
     };
