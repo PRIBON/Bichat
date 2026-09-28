@@ -226,7 +226,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
 // Version de l'app (voir VERSIONS.md). Affichée en bas + comparée à la version
 // canonique renvoyée par l'Apps Script (get-version) pour proposer la mise à jour.
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.3.0";
 
 // >>> À REMPLIR avec la config de TON projet Firebase PRIBON (voir README) <<<
 /* ===== Magasins (multi-magasins) — MÊME code pour tous, config Firebase par magasin ===== */
@@ -1300,7 +1300,9 @@ function ProductCard({ line, lk, state, readOnly, onConforme, onEcart, onNonRecu
 
 function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
   // reception: objet existant (draft) ou null -> on crée
-  const [recId,setRecId]=useState(reception?.id||null);
+  // Brouillon PARTAGÉ par document : clé déterministe -> tous ceux qui ouvrent le même BL rejoignent
+  // la MÊME réception (live, multi-personnes, comme la MU/prépa) au lieu de créer des doublons.
+  const [recId,setRecId]=useState(()=> reception?.id || (doc&&doc.id ? "rec_"+String(doc.id).replace(/[.#$/\[\]]/g,"_") : null));
   const [lineStates,setLineStates]=useState(()=> (reception?.lines)||{});
   const [search,setSearch]=useState("");
   const [ecartFor,setEcartFor]=useState(null); // {line, lk}
@@ -1329,20 +1331,22 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
     if(window.confirm("Quitter la réception en cours ?\n\nLe pointage déjà saisi est enregistré : tu pourras la reprendre.")) onExit();
   };
 
-  // Crée le draft si nécessaire
-  useEffect(()=>{ let cancelled=false;
+  // Crée le brouillon partagé s'il n'existe pas encore (sans écraser les lignes déjà pointées par un autre).
+  useEffect(()=>{
     (async()=>{
-      if(recId || readOnly || !db) return;
-      const ref=db.ref("receptions").push();
-      const rec={ docId:doc.id, docNumber:doc.docNumber, supplier:doc.supplier, type:doc.type||"BL",
-        storeCode:STORE.code, storeLabel:STORE.label, appName:STORE.appName,
-        operatorCode:operator.code,   // pas de nom : seul le code est stocké
-        status:"draft", createdAt:firebase.database.ServerValue.TIMESTAMP, updatedAt:firebase.database.ServerValue.TIMESTAMP, lines:{} };
-      await ref.set(rec);
-      if(!cancelled) setRecId(ref.key);
+      if(readOnly || !db || !recId) return;
+      try{
+        const ref=db.ref("receptions/"+recId);
+        const snap=await ref.get();
+        if(!snap.exists()){
+          // update (et non set) : n'écrit que les champs de base, ne touche jamais à /lines -> pas d'écrasement en cas de course.
+          await ref.update({ docId:doc.id, docNumber:doc.docNumber, supplier:doc.supplier, type:doc.type||"BL",
+            storeCode:STORE.code, storeLabel:STORE.label, appName:STORE.appName, operatorCode:operator.code,
+            status:"draft", createdAt:firebase.database.ServerValue.TIMESTAMP, updatedAt:firebase.database.ServerValue.TIMESTAMP });
+        }
+      }catch(e){}
     })();
-    return ()=>{ cancelled=true; };
-  },[]);
+  },[recId,readOnly]);
 
   // Live : suit les pointages des autres vendeurs sur la MÊME réception, en temps réel.
   useEffect(()=>{ if(!db || !recId || readOnly) return;
@@ -1677,11 +1681,20 @@ function AdminLoad(){
             </div>
           )}
           <div className="small-note">N° BL détecté : <b>{parsed.docNumber||"—"}</b> · Format : {parsed.format} · {parsed.lines.length} lignes{parsed.skipped?` · ${parsed.skipped} ligne(s) ignorée(s)`:""}</div>
+          {(()=>{ const liv=parsed.lines.filter(l=>!l.nonLivre); const avec=liv.filter(l=>l.cdt>0).length; const sans=liv.length-avec;
+            return (
+              <div className="small-note" style={{marginTop:6,padding:"6px 10px",borderRadius:6,background:sans>0?"#fff7e6":"#eef7f0",border:"1px solid "+(sans>0?"#f0c36d":"#bfe3c8")}}>
+                📦 Colisage lu automatiquement : <b>{avec}</b> ligne(s) avec colisage{sans>0?<> · <b style={{color:"#c65200"}}>{sans} sans colisage</b> (vérifie la colonne PCB du BL — sinon quantité traitée à l'unité)</>:" ✓"}
+              </div>
+            );
+          })()}
           <div style={{maxHeight:300,overflow:"auto",marginTop:10,border:"1px solid #e6e8ec",borderRadius:8}}>
-            <table className="prev-table"><thead><tr><th>Article</th><th>Désignation</th><th>EAN</th><th>Attendu</th></tr></thead>
+            <table className="prev-table"><thead><tr><th>Article</th><th>Désignation</th><th>EAN</th><th>Colisage</th><th>Attendu</th></tr></thead>
               <tbody>{parsed.lines.slice(0,300).map((l,i)=>(
-                <tr key={i} style={l.nonLivre?{opacity:.5}:null}>
-                  <td>{l.article}</td><td>{l.designation}</td><td>{l.ean}</td><td>{l.nonLivre?"(non livré)":l.attendu}</td></tr>))}</tbody></table>
+                <tr key={i} style={l.nonLivre?{opacity:.5}:(!l.cdt?{background:"#fff7e6"}:null)}>
+                  <td>{l.article}</td><td>{l.designation}</td><td>{l.ean}</td>
+                  <td>{l.nonLivre?"—":(l.cdt?`×${l.cdt} → ${l.attendu/l.cdt} colis`:"—")}</td>
+                  <td>{l.nonLivre?"(non livré)":l.attendu}</td></tr>))}</tbody></table>
           </div>
           <button className="btn-primary" style={{marginTop:12}} onClick={save} disabled={busy}>Enregistrer ce document</button>
           <button className="btn-secondary" onClick={resetLoad} disabled={busy}>Repartir de zéro</button>
