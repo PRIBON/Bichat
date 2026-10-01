@@ -226,7 +226,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
 // Version de l'app (voir VERSIONS.md). Affichée en bas + comparée à la version
 // canonique renvoyée par l'Apps Script (get-version) pour proposer la mise à jour.
-const APP_VERSION = "1.3.1";
+const APP_VERSION = "1.3.2";
 
 // >>> À REMPLIR avec la config de TON projet Firebase PRIBON (voir README) <<<
 /* ===== Magasins (multi-magasins) — MÊME code pour tous, config Firebase par magasin ===== */
@@ -368,6 +368,9 @@ const nowISO = () => new Date().toISOString();
 function norm(s){ return (s||"").toString().normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase().trim(); }
 function toNum(s){ if(s==null) return 0; const n=parseFloat(String(s).replace(/\s/g,"").replace(",",".")); return isNaN(n)?0:n; }
 function lineKey(p, idx){ if(p && p._lk) return p._lk; const a=(p.article||"").toString().trim(); return a ? "a_"+a.replace(/[.#$/\[\]]/g,"_") : "i_"+idx; }
+// « 1 colis de 6 » / « 2 colis de 8 » / « 1 colis de 6 + 2 » (info seulement)
+function fmtColis(q,cdt){ q=Number(q)||0; cdt=Number(cdt)||0; if(!cdt) return ""; const n=Math.floor(q/cdt), rest=Math.round((q-n*cdt)*1000)/1000;
+  return (n?n+" colis de "+cdt:"")+(rest?(n?" + ":"")+rest+" u":"")||("0 colis de "+cdt); }
 function fmtDate(ts){ if(!ts) return ""; const d=new Date(ts); return d.toLocaleDateString("fr-FR")+" "+d.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}); }
 
 /* ============================== PARSEURS ============================== */
@@ -418,7 +421,24 @@ function parseTXT(text){
   return { docNumber, supplier:"", lines: out, skipped };
 }
 
+// Vitafrais : sur le PDF, la colonne PCB est imprimée ~1 px plus bas que la ligne article,
+// pdf.js la sort donc sur une ligne à part (« 6 » seul). On la ré-injecte entre « Colis » et l'EAN.
+function fixVitafraisPcbRows(rowLines){
+  const out=[];
+  const reNoPcb=/^(\d{2,7}\s+.*\S\s+)(\d+)\s+(\d{8,13})\s+(\d+)(\s+[\d.,]+(?:\s+[\d.,]+)?)\s*$/;
+  for(let i=0;i<rowLines.length;i++){
+    const L=rowLines[i], nx=rowLines[i+1];
+    const m=L.match(reNoPcb);
+    if(m && nx && /^\d{1,4}$/.test(nx.trim())){
+      const colis=+m[2], pcb=+nx.trim(), qte=+m[4];
+      if(pcb>0 && (colis*pcb===qte || qte%pcb===0)){ out.push(m[1]+m[2]+" "+pcb+" "+m[3]+" "+m[4]+m[5]); i++; continue; }
+    }
+    out.push(L);
+  }
+  return out;
+}
 function parsePDFLines(rowLines){
+  rowLines=fixVitafraisPcbRows(rowLines);
   const out=[]; let supplier=""; let docNumber=""; const commandes=[];
   // Vitafrais : Code | Désignation+Marque | COLIS livrés | PCB (pièces/colis) | EAN | Qté(total) | Poids | [PU HT]
   //   -> cdt = PCB (colisage) ; qteCmd = colis livrés ; attendu = Qté totale (pièces) = colis × PCB.
@@ -546,6 +566,9 @@ function parseAgidraRows(rows, filename){
   const col=(names)=>{ for(const n of names){ const idx=head.findIndex(h=>h.includes(n)); if(idx>=0) return idx; } return -1; };
   const iRef=col(["ref"]), iDes=col(["designation"]), iEan=col(["ean"]),
         iColisage=col(["colisage"]), iQte=col(["qte","quantite","qty"]);
+  // Export commande G5 (Code / Qté initiale / Quantité / Condition. / Qté finale / Colisage « C6 ») :
+  // « Qté finale » = quantité en UNITÉS → c'est l'attendu.
+  const iQteFin=head.findIndex(h=>h==="qte finale");
   const out=[];
   for(let r=hIdx+1;r<rows.length;r++){
     const c=rows[r]||[];
@@ -553,9 +576,9 @@ function parseAgidraRows(rows, filename){
     const des=String(iDes>=0?c[iDes]:"").trim();
     if(!ref && !des) continue;
     if(!ref && /^(total|nb |poids|epicerie|boisson)/i.test(des)) continue; // lignes de regroupement
-    const colisage=toNum(iColisage>=0?c[iColisage]:0)||0;
+    const colisage=toNum(String(iColisage>=0?c[iColisage]:"").replace(/^C/i,""))||0;
     const qcolis=toNum(iQte>=0?c[iQte]:0);
-    const attendu = colisage>0 ? Math.round(qcolis*colisage) : qcolis;
+    const attendu = iQteFin>=0 ? toNum(c[iQteFin]) : (colisage>0 ? Math.round(qcolis*colisage) : qcolis);
     out.push({ article:ref, ean:String(iEan>=0?c[iEan]:"").trim().replace(/^0+(?=\d)/,""),
       designation:des, marque:"", attendu, cdt: colisage>0?colisage:null, categorie:"Autres" });
   }
@@ -573,14 +596,18 @@ function mergeParsed(list){
   const map=new Map(); const order=[]; const nonLivres=[];
   const docNums=[], suppliers=[], formats=[], commandes=[]; let skipped=0;
   list.forEach(r=>{
+    const kind = r.format==="XLSX" ? "BC" : "BL";
     (r.lines||[]).forEach(l=>{
       if(l.nonLivre){ nonLivres.push(l); return; }
       const k=(l.article||"").trim() || ("ean_"+(l.ean||"")) || ("des_"+norm(l.designation));
-      if(map.has(k)){ const e=map.get(k); e.attendu=(e.attendu||0)+(l.attendu||0);
+      if(map.has(k)){ const e=map.get(k);
+        if(e._kind===kind) e.attendu=(e.attendu||0)+(l.attendu||0);          // 2 commandes (ou 2 BL) : on additionne
+        else if(kind==="BC") e.attendu=l.attendu;                             // BC + BL : la commande fait foi
+        if(!e.ean && l.ean) e.ean=l.ean;
         // Récupère le colisage depuis le fichier qui le porte (ex. commande sans cdt + BL avec cdt).
         if((e.cdt==null) && l.cdt!=null){ e.cdt=l.cdt; e.qteCmd=l.qteCmd; e.unit=l.unit||"colis"; }
       }
-      else { map.set(k, {...l}); order.push(k); }
+      else { map.set(k, {...l, _kind:kind}); order.push(k); }
     });
     if(r.docNumber) docNums.push(r.docNumber);
     if(r.supplier) suppliers.push(r.supplier);
@@ -591,7 +618,7 @@ function mergeParsed(list){
   return {
     docNumber:[...new Set(docNums)].filter(Boolean).join(" + "),
     supplier:[...new Set(suppliers)].filter(Boolean).join(" / "),
-    lines: order.map(k=>map.get(k)).concat(nonLivres),
+    lines: order.map(k=>{ const e={...map.get(k)}; delete e._kind; return e; }).concat(nonLivres),
     format:[...new Set(formats)].filter(Boolean).join("+"),
     commandes, skipped
   };
@@ -1115,7 +1142,7 @@ function EcartModal({ line, current, onSave, onClose }){
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={e=>e.stopPropagation()}>
         <h3>Non conforme</h3>
-        <div className="sub">{line.designation}<br/>Attendu : <b>{line.attendu}</b>{cdt?` pièces (${line.attendu/cdt} colis de ${cdt})`:""}</div>
+        <div className="sub">{line.designation}<br/>Attendu : <b>{line.attendu}</b>{cdt?` (info : ${fmtColis(line.attendu,cdt)})`:""}</div>
         <div className="field">
           <label>Motif</label>
           <select value={motif} onChange={e=>setMotif(e.target.value)}>
@@ -1226,7 +1253,7 @@ function DetailModal({ line, onClose }){
       <div className="modal" onClick={e=>e.stopPropagation()}>
         <h3>Détail article</h3>
         <div style={{fontSize:18,fontWeight:800,lineHeight:1.35,margin:"4px 0 14px",wordBreak:"break-word"}}>{line.designation}</div>
-        <div className="recap-stat"><span className="label">Attendu</span><span className="value">{line.cdt?`${line.attendu/line.cdt} colis (${line.attendu} u · colis de ${line.cdt})`:line.attendu}</span></div>
+        <div className="recap-stat"><span className="label">Attendu</span><span className="value">{line.cdt?`${line.attendu} (info : ${fmtColis(line.attendu,line.cdt)})`:line.attendu}</span></div>
         {line.article && <div className="recap-stat"><span className="label">Code article</span><span className="value">{line.article}</span></div>}
         {line.ean && <div className="recap-stat"><span className="label">EAN</span><span className="value">{line.ean}</span></div>}
         {line.marque && <div className="recap-stat"><span className="label">Marque</span><span className="value">{line.marque}</span></div>}
@@ -1287,7 +1314,7 @@ function ProductCard({ line, lk, state, readOnly, onConforme, onEcart, onNonRecu
       </div>
       <div className="product-meta">
         {line.cdt
-          ? <span className="attendu-pill"><b style={{fontSize:22}}>{line.attendu/line.cdt}</b> colis <span style={{color:"#888",fontSize:11,fontWeight:600}}>(quantité : {line.attendu} · colis de {line.cdt})</span></span>
+          ? <span className="attendu-pill">Attendu <b style={{fontSize:22}}>{line.attendu}</b> <span style={{color:"#888",fontSize:11,fontWeight:600}}>(info : {fmtColis(line.attendu,line.cdt)})</span></span>
           : <span className="attendu-pill">Attendu <b>{line.attendu}</b></span>}
         {line.poidsVariable && <span className="badge" style={{background:"#fdecea",color:"#c62828"}}>⚖️ poids variable</span>}
         {line.article && <span className="article">#{line.article}</span>}
@@ -1298,7 +1325,7 @@ function ProductCard({ line, lk, state, readOnly, onConforme, onEcart, onNonRecu
         <div className="actions-col">
           <button className={"btn-conf"+(st.status==="conforme"?" on":"")}
             style={line.poidsVariable?{background:(st.status==="conforme"?"#2e7d32":"#c62828")}:null}
-            onClick={onConforme}>{line.poidsVariable?"✓ Conforme — saisir le poids":(line.cdt?("✓ Reçu conforme — "+(line.attendu/line.cdt)+" colis"):"✓ Reçu conforme")}</button>
+            onClick={onConforme}>{line.poidsVariable?"✓ Conforme — saisir le poids":("✓ Reçu conforme — "+line.attendu)}</button>
           <div className="actions-row">
             <button className={"btn-nonconf"+(st.status==="ecart"?" on":"")} onClick={onEcart}>Non conforme</button>
             <button className={"btn-nonrecu"+(st.status==="nonrecu"?" on":"")} onClick={onNonRecu}>Pas reçu</button>
@@ -1309,11 +1336,11 @@ function ProductCard({ line, lk, state, readOnly, onConforme, onEcart, onNonRecu
       {st.status && (
         <div className="line-state">
           {st.status==="conforme"
-            ? <span>✓ Conforme{line.poidsVariable ? <> — poids reçu <b>{st.poids} kg</b></> : <> — <b>{line.cdt?(st.reel/line.cdt):st.reel}</b> {line.cdt?"colis":"reçu"}</>}</span>
+            ? <span>✓ Conforme{line.poidsVariable ? <> — poids reçu <b>{st.poids} kg</b></> : <> — <b>{st.reel}</b> reçu{line.cdt?` (${fmtColis(st.reel,line.cdt)})`:""}</>}</span>
             : st.status==="nonrecu"
               ? <span>✗ <b>Pas reçu</b> — 0 sur {line.attendu} attendu(s)</span>
               : st.status==="surplus"
-                ? <span>➕ <b>Reçu en plus</b> — <b>{st.reel}</b> reçu{line.cdt?` (${st.reel/line.cdt} colis)`:""} pour {line.attendu} attendu <b>(+{st.surplus})</b>{st.ecartText?" — "+st.ecartText:""}</span>
+                ? <span>➕ <b>Reçu en plus</b> — <b>{st.reel}</b> reçu{line.cdt?` (${fmtColis(st.reel,line.cdt)})`:""} pour {line.attendu} attendu <b>(+{st.surplus})</b>{st.ecartText?" — "+st.ecartText:""}</span>
                 : <span>⚠ {motifLabel(st.motif)}{st.avoir?" (avoir)":""} — apte vente : <b>{st.aptevente!=null?st.aptevente:st.reel}</b>{line.poidsVariable&&st.poids?` · poids ${st.poids} kg`:""}{st.ecartText?" — "+st.ecartText:""}
                   {st.photoUrl && <a href={st.photoUrl} target="_blank" rel="noreferrer" style={{marginLeft:8}}>📷 photo</a>}</span>}
         </div>
@@ -1492,7 +1519,7 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
                     <button className="info-btn" onClick={()=>setDetailFor(l)} title="Voir toute la désignation">ⓘ détail</button>
                   </div>
                   <div className="line-state">
-                    {st.status==="conforme"?<span>✓ Conforme{l.poidsVariable?<> — <b>{st.poids} kg</b></>:<> — <b>{l.cdt?(st.reel/l.cdt):st.reel}</b> {l.cdt?"colis":""}</>}</span>
+                    {st.status==="conforme"?<span>✓ Conforme{l.poidsVariable?<> — <b>{st.poids} kg</b></>:<> — <b>{st.reel}</b>{l.cdt?` (${fmtColis(st.reel,l.cdt)})`:""}</>}</span>
                      :st.status==="nonrecu"?<span>✗ <b>Pas reçu</b></span>
                      :st.status==="surplus"?<span>➕ <b>Reçu en plus</b> — <b>{st.reel}</b> reçu pour {l.attendu} (+{st.surplus})</span>
                      :<span>⚠ {motifLabel(st.motif)}{st.avoir?" (avoir)":""} — apte vente <b>{st.aptevente!=null?st.aptevente:st.reel}</b>{st.ecartText?" — "+st.ecartText:""}{st.photoUrl && <a href={st.photoUrl} target="_blank" rel="noreferrer" style={{marginLeft:8}}>📷</a>}</span>}
@@ -1717,7 +1744,7 @@ function AdminLoad(){
               <tbody>{parsed.lines.slice(0,300).map((l,i)=>(
                 <tr key={i} style={l.nonLivre?{opacity:.5}:(!l.cdt?{background:"#fff7e6"}:null)}>
                   <td>{l.article}</td><td>{l.designation}</td><td>{l.ean}</td>
-                  <td>{l.nonLivre?"—":(l.cdt?`×${l.cdt} → ${l.attendu/l.cdt} colis`:"—")}</td>
+                  <td>{l.nonLivre?"—":(l.cdt?fmtColis(l.attendu,l.cdt):"—")}</td>
                   <td>{l.nonLivre?"(non livré)":l.attendu}</td></tr>))}</tbody></table>
           </div>
           <button className="btn-primary" style={{marginTop:12}} onClick={save} disabled={busy}>Enregistrer ce document</button>
