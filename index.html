@@ -226,7 +226,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
 // Version de l'app (voir VERSIONS.md). Affichée en bas + comparée à la version
 // canonique renvoyée par l'Apps Script (get-version) pour proposer la mise à jour.
-const APP_VERSION = "1.3.2";
+const APP_VERSION = "1.3.3";
 
 // >>> À REMPLIR avec la config de TON projet Firebase PRIBON (voir README) <<<
 /* ===== Magasins (multi-magasins) — MÊME code pour tous, config Firebase par magasin ===== */
@@ -1142,7 +1142,7 @@ function EcartModal({ line, current, onSave, onClose }){
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={e=>e.stopPropagation()}>
         <h3>Non conforme</h3>
-        <div className="sub">{line.designation}<br/>Attendu : <b>{line.attendu}</b>{cdt?` (info : ${fmtColis(line.attendu,cdt)})`:""}</div>
+        <div className="sub">{line.designation}<br/>Quantité attendue : <b style={{fontSize:22}}>{line.attendu}</b>{cdt?<span style={{color:"#999",fontSize:12}}>{` (${fmtColis(line.attendu,cdt)})`}</span>:""}</div>
         <div className="field">
           <label>Motif</label>
           <select value={motif} onChange={e=>setMotif(e.target.value)}>
@@ -1153,8 +1153,8 @@ function EcartModal({ line, current, onSave, onClose }){
         {M && (
           <div className="field">
             <label>{M.ask}</label>
-            <input inputMode="numeric" value={val} onChange={e=>setVal(e.target.value.replace(/[^0-9.,]/g,""))} placeholder={M.mode==="reel"?"quantité reçue":"0 (en unités)"}/>
-            <div className="small-note">{cdt&&toNum(val)>0?`= ${(toNum(val)/cdt)} colis · `:""}{M.avoir?"→ demande d'avoir":"→ signalé (pas d'avoir)"}</div>
+            <input inputMode="numeric" style={{fontSize:26,fontWeight:800,textAlign:"center"}} value={val} onChange={e=>setVal(e.target.value.replace(/[^0-9.,]/g,""))} placeholder={M.mode==="reel"?"quantité reçue (ex. 5)":"quantité (ex. 1)"}/>
+            <div className="small-note">{val!==""?(M.mode==="reel"?`Reçu ${toNum(val)} sur ${line.attendu} · manque ${Math.max(0,line.attendu-toNum(val))} · `:`Manque ${toNum(val)} sur ${line.attendu} · reçu ${Math.max(0,line.attendu-toNum(val))} · `):""}{M.avoir?"→ demande d'avoir":"→ signalé (pas d'avoir)"}</div>
           </div>
         )}
         {line.poidsVariable && (
@@ -1314,8 +1314,8 @@ function ProductCard({ line, lk, state, readOnly, onConforme, onEcart, onNonRecu
       </div>
       <div className="product-meta">
         {line.cdt
-          ? <span className="attendu-pill">Attendu <b style={{fontSize:22}}>{line.attendu}</b> <span style={{color:"#888",fontSize:11,fontWeight:600}}>(info : {fmtColis(line.attendu,line.cdt)})</span></span>
-          : <span className="attendu-pill">Attendu <b>{line.attendu}</b></span>}
+          ? <span className="attendu-pill" style={{padding:"6px 14px"}}>Quantité attendue <b style={{fontSize:30,marginLeft:4}}>{line.attendu}</b> <span style={{color:"#999",fontSize:11,fontWeight:600,marginLeft:6}}>({fmtColis(line.attendu,line.cdt)})</span></span>
+          : <span className="attendu-pill" style={{padding:"6px 14px"}}>Quantité attendue <b style={{fontSize:30,marginLeft:4}}>{line.attendu}</b></span>}
         {line.poidsVariable && <span className="badge" style={{background:"#fdecea",color:"#c62828"}}>⚖️ poids variable</span>}
         {line.article && <span className="article">#{line.article}</span>}
         {line.ean && <span>EAN …{String(line.ean).slice(-4)}</span>}
