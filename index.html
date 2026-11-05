@@ -266,13 +266,29 @@ function fireworks(){
   }catch(e){}
 }
 
+/* v1.5.0 — MODIFICATION APRÈS CLÔTURE : possible le jour de la validation jusqu'à 23h.
+   Chaque changement est tracé (heure exacte + initiales + vendeur connecté) dans receptions/<id>/modifs. */
+const MODIF_LIMIT_HOUR = 23;
+function canModifyRec(r){
+  if(!r || r.status!=="validated" || !r.validatedAt) return false;
+  const v=new Date(r.validatedAt), n=new Date();
+  return v.toDateString()===n.toDateString() && n.getHours()<MODIF_LIMIT_HOUR;
+}
+function stLabel(s){
+  if(!s || !s.status) return "non pointé";
+  if(s.status==="conforme") return "conforme "+((s.poids!=null&&s.poids!=="")?(s.poids+" kg"):(s.reel!=null?s.reel:""));
+  if(s.status==="nonrecu") return "pas reçu";
+  if(s.status==="surplus") return "reçu en plus "+(s.reel!=null?s.reel:"");
+  return motifLabel(s.motif)+" — apte vente "+(s.aptevente!=null?s.aptevente:(s.reel!=null?s.reel:""));
+}
+
 /* ===================================================================== */
 /* ============================ CONFIGURATION =========================== */
 /* ===================================================================== */
 
 // Version de l'app (voir VERSIONS.md). Affichée en bas + comparée à la version
 // canonique renvoyée par l'Apps Script (get-version) pour proposer la mise à jour.
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.0";
 
 // >>> À REMPLIR avec la config de TON projet Firebase PRIBON (voir README) <<<
 /* ===== Magasins (multi-magasins) — MÊME code pour tous, config Firebase par magasin ===== */
@@ -965,6 +981,7 @@ function HomeScreen({ operator, onOpenDoc, onOpenReception, onLogout, onAfterVal
   const drafts = receptions.filter(r=>r.status!=="validated");
   // Vendeur : un document VALIDÉ disparaît (déjà réceptionné). On ne montre que ceux à faire / en cours.
   const openDocs = docs.filter(d=>{ const rec=receptions.find(r=>r.docId===d.id); return !rec || rec.status!=="validated"; });
+  const modifiables = receptions.filter(r=>canModifyRec(r));
   const activeCount = (d)=> (d && d.lines ? d.lines.filter(l=>!l.nonLivre).length : 0);
   const pointedCount = (recLines)=> Object.values(recLines||{}).filter(s=>s&&s.status).length;
   const docById = (id)=> docs.find(d=>d.id===id);
@@ -981,12 +998,12 @@ function HomeScreen({ operator, onOpenDoc, onOpenReception, onLogout, onAfterVal
     await validateReceptionCore({ recId:rec.id, doc, operatorCode:operator.code, lineStates:rec.lines||{}, activeLines });
   };
   const onValidateOne=async(rec)=>{
-    if(!confirm("Valider cette réception ?\n\nUne fois validée, impossible de corriger (il faudra refaire une saisie).")) return;
+    if(!confirm("Valider cette réception ?\n\nElle restera modifiable aujourd'hui jusqu'à "+MODIF_LIMIT_HOUR+"h (avec tes initiales).")) return;
     setBusy(true); try{ await validateOne(rec); onAfterValidate(); }catch(e){ alert("Erreur : "+e.message); } setBusy(false);
   };
   const onValidateAll=async()=>{
     if(!drafts.length) return;
-    if(!confirm("Valider les "+drafts.length+" réception(s) en cours ?\n\nUne fois validées, impossible de corriger.")) return;
+    if(!confirm("Valider les "+drafts.length+" réception(s) en cours ?\n\nElles resteront modifiables aujourd'hui jusqu'à "+MODIF_LIMIT_HOUR+"h (avec tes initiales).")) return;
     setBusy(true); try{ for(const r of drafts){ await validateOne(r); } onAfterValidate(); }catch(e){ alert("Erreur : "+e.message); } setBusy(false);
   };
   // Suppression (admin/master) : efface un DOCUMENT de test/résidu + sa/ses réception(s) associée(s).
@@ -1072,6 +1089,18 @@ function HomeScreen({ operator, onOpenDoc, onOpenReception, onLogout, onAfterVal
               <button className="btn-conf" style={{flex:1}} onClick={()=>onOpenDoc(r)}>Modifier</button>
               <button className="btn-finish" style={{flex:1,padding:12}} onClick={()=>onValidateOne(r)} disabled={busy}>Valider</button>
               {operator.isMaster && <button className="btn-secondary" style={{flex:"0 0 auto",background:"#fdecea",color:"#c62828",fontWeight:700}} onClick={(e)=>deleteDraft(e,r)} disabled={busy} title="Supprimer cette réception">🗑</button>}
+            </div>
+          </div>
+        ))}
+
+        {modifiables.length>0 && <h3 style={{margin:"22px 4px 8px"}}>Validées aujourd'hui — modifiables jusqu'à {MODIF_LIMIT_HOUR}h</h3>}
+        {modifiables.map(r=>(
+          <div key={"m"+r.id} className="doc-card" onClick={()=>onOpenDoc(r)}>
+            <div className="t">{r.supplier} — {r.type||"BL"} {r.docNumber}</div>
+            <div className="m">
+              <span className="badge valid">Validée {fmtDate(r.validatedAt)}</span>
+              {r.modifCount>0 && <span className="badge draft">✏️ modifiée {r.modifCount} fois</span>}
+              <span className="go">Voir / modifier →</span>
             </div>
           </div>
         ))}
@@ -1410,7 +1439,15 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
   const [scanOpen,setScanOpen]=useState(false); // scanner code-barres
   const [showDone,setShowDone]=useState(false); // encart "Réceptionné" replié
   const [addProdOpen,setAddProdOpen]=useState(false); // ajout d'un produit hors BL
-  const readOnly = reception && reception.status==="validated";
+  const validatedRec = !!(reception && reception.status==="validated");
+  const [editIni,setEditIni]=useState("");   // v1.5.0 : initiales de la personne qui modifie après clôture
+  const [iniAsk,setIniAsk]=useState(false);
+  const [iniVal,setIniVal]=useState("");
+  const [savingModif,setSavingModif]=useState(false);
+  const editMode = validatedRec && !!editIni;
+  const readOnly = validatedRec && !editIni;
+  const canModify = validatedRec && canModifyRec(reception);
+  const lsRef = useRef(lineStates); lsRef.current = lineStates;
 
   const activeLines = useMemo(()=> (doc.lines||[]).filter(l=>!l.nonLivre), [doc]);
   const nonLivres = useMemo(()=> (doc.lines||[]).filter(l=>l.nonLivre), [doc]);
@@ -1425,6 +1462,7 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
   // Confirmation de sortie (évite de quitter la réception sans faire exprès). Rien n'est perdu : pointage enregistré.
   const requestExit=()=>{
     if(readOnly){ onExit(); return; }
+    if(editMode){ if(window.confirm("Enregistrer la modification et quitter ?")) finishModif(); return; }
     if(window.confirm("Quitter la réception en cours ?\n\nLe pointage déjà saisi est enregistré : tu pourras la reprendre.")) onExit();
   };
 
@@ -1453,19 +1491,44 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
   },[recId,readOnly]);
 
   // Écriture PAR LIGNE : deux vendeurs peuvent pointer la même réception sans s'écraser.
+  // v1.5.0 : en mode modification, chaque changement est journalisé (heure + initiales + vendeur connecté).
+  const logModif=(lk,before,after)=>{
+    if(!editIni || !db || !recId) return;
+    try{ db.ref("receptions/"+recId+"/modifs").push({ at:firebase.database.ServerValue.TIMESTAMP, atLocal:Date.now(),
+      ini:editIni, op:operator.code||"", lk, designation:(after&&after.designation)||(before&&before.designation)||lk,
+      avant:stLabel(before), apres:after?stLabel(after):"effacé (à repointer)" }); }catch(e){}
+  };
   const persistLine=useCallback(async(lk,obj)=>{
+    const before=lsRef.current[lk];
     setLineStates(prev=>({ ...prev, [lk]:obj }));
     if(readOnly || !recId || !db) return;
     try{
       await db.ref("receptions/"+recId+"/lines/"+lk).set(obj);
       await db.ref("receptions/"+recId).update({ updatedAt:firebase.database.ServerValue.TIMESTAMP });
+      logModif(lk,before,obj);
     }catch(e){}
-  },[recId,readOnly]);
+  },[recId,readOnly,editIni]);
   const clearLine=useCallback(async(lk)=>{
+    const before=lsRef.current[lk];
     setLineStates(prev=>{ const n={...prev}; delete n[lk]; return n; });
     if(readOnly || !recId || !db) return;
-    try{ await db.ref("receptions/"+recId+"/lines/"+lk).remove(); }catch(e){}
-  },[recId,readOnly]);
+    try{ await db.ref("receptions/"+recId+"/lines/"+lk).remove(); logModif(lk,before,null); }catch(e){}
+  },[recId,readOnly,editIni]);
+  // Fin de modification : marque la réception « modifiée » (heure + initiales) ; si déjà saisie sur G5, la console la remet à traiter.
+  const finishModif=async()=>{
+    if(!db || !recId){ onExit(); return; }
+    setSavingModif(true);
+    try{
+      const cur=(await db.ref("receptions/"+recId).get()).val()||{};
+      const ls=cur.lines||{}; let ec=0;
+      activeLines.forEach((l,i)=>{ const s=ls[lineKey(l,i)]; if(s && s.status && s.status!=="conforme") ec++; });
+      await db.ref("receptions/"+recId).update({ modifiedAt:firebase.database.ServerValue.TIMESTAMP, modifiedBy:editIni,
+        modifCount:(cur.modifCount||0)+1, ecartCount:ec, g5Stale:!!cur.g5Validated });
+      setToast("✏️ Modification enregistrée ("+editIni+")"); setEditIni("");
+      setTimeout(()=>onExit(),900);
+    }catch(e){ alert("Erreur : "+e.message); }
+    setSavingModif(false);
+  };
 
   const setConforme=(line,lk)=>{
     if(line.poidsVariable){ setPoidsFor({line,lk}); return; }  // poids obligatoire
@@ -1524,7 +1587,7 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
     <div className="app">
       <div className="header"><div className="header-row">
         <div><h1>{doc.supplier||"BL"} {doc.docNumber}</h1>
-          <div className="sub">{readOnly?"Réception validée (lecture seule)":"Pointage en cours"}
+          <div className="sub">{editMode?("✏️ Modification après clôture — "+editIni):readOnly?"Réception validée (lecture seule)":"Pointage en cours"}
             {doc.commandes && doc.commandes.length>0 && <> · Commande(s) : {doc.commandes.join(" + ")}</>}</div></div>
         <button className="header-btn" onClick={requestExit}>← Retour</button>
       </div>
@@ -1534,6 +1597,26 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
       </div>}
       </div>
 
+      {editMode && <div style={{background:"#fff3e0",color:"#a33a00",padding:"10px 14px",fontSize:13,fontWeight:700,borderBottom:"2px solid #e65100"}}>✏️ Modification après clôture — <b>{editIni}</b> · chaque changement est enregistré avec l'heure. Termine par « Enregistrer la modification ».</div>}
+      {readOnly && !canModify && <div className="small-note" style={{padding:"8px 14px",margin:0}}>Réception validée. Modifiable le jour même jusqu'à {MODIF_LIMIT_HOUR}h — après, prévenir le responsable.</div>}
+      {iniAsk && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h3>✏️ Modifier une réception validée</h3>
+            <div className="sub">Carton retrouvé, oubli ? Tape tes <b>initiales</b> : chaque changement sera enregistré avec l'heure exacte.</div>
+            <div className="field">
+              <input value={iniVal} autoFocus maxLength={4} placeholder="Ex : HG" autoComplete="off"
+                style={{fontSize:24,fontWeight:800,textAlign:"center",letterSpacing:4,textTransform:"uppercase"}}
+                onChange={e=>setIniVal(e.target.value.replace(/[^A-Za-zÀ-ÿ]/g,"").toUpperCase())}
+                onKeyDown={e=>{ if(e.key==="Enter" && iniVal.length>=2){ setEditIni(iniVal); setIniAsk(false); } }}/>
+            </div>
+            <div className="modal-actions">
+              <button className="btn-cancel" onClick={()=>setIniAsk(false)}>Annuler</button>
+              <button className="btn-confirm" disabled={iniVal.length<2} onClick={()=>{ setEditIni(iniVal); setIniAsk(false); }}>Commencer</button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="search-bar" style={{display:"flex",gap:8}}>
         <input style={{flex:1}} value={search} onChange={e=>setSearch(e.target.value)} placeholder="Rechercher : mot-clé, marque, EAN…"/>
         {!readOnly && <button className="header-btn" style={{background:"#1a4d2e",color:"#fff",padding:"0 14px",fontSize:20,borderRadius:8}} onClick={()=>setScanOpen(true)} title="Scanner un code-barres">📷</button>}
@@ -1606,8 +1689,13 @@ function ReceptionScreen({ operator, doc, reception, onExit, onGoRecap }){
           <span>Écarts : {ecartCount}</span>
           {addedLines.length>0 && <span>Hors BL : {addedLines.length}</span>}
         </div>
-        {readOnly
-          ? <button className="btn-finish" onClick={onExit}>Retour accueil</button>
+        {editMode
+          ? <button className="btn-finish" style={{background:"#e65100"}} onClick={finishModif} disabled={savingModif}>{savingModif?"…":("✅ Enregistrer la modification ("+editIni+")")}</button>
+          : readOnly
+          ? <div style={{display:"flex",gap:8}}>
+              {canModify && <button className="btn-finish" style={{flex:1,background:"#e65100"}} onClick={()=>{ setIniVal(""); setIniAsk(true); }}>✏️ Modifier (jusqu'à {MODIF_LIMIT_HOUR}h)</button>}
+              <button className="btn-finish" style={{flex:1}} onClick={onExit}>Retour accueil</button>
+            </div>
           : <button className="btn-finish" onClick={()=>onGoRecap({ id:recId, lineStates, activeLines:allLines })}>Voir le récapitulatif</button>}
       </div>
 
@@ -1674,7 +1762,7 @@ function RecapScreen({ operator, doc, recId, lineStates, activeLines, onBack, on
           ? <button className="btn-finish" onClick={()=>setConfirming(true)}>Valider la réception</button>
           : (
             <div className="recap-card">
-              <div className="warn-box">Attention : une fois validée, la réception est enregistrée définitivement et ne peut plus être corrigée. En cas d'erreur, il faudra refaire une nouvelle saisie.</div>
+              <div className="warn-box">Une fois validée, la réception part au bureau. Carton retrouvé ou oubli ? Elle reste modifiable aujourd'hui jusqu'à {MODIF_LIMIT_HOUR}h, avec tes initiales.</div>
               <div style={{fontWeight:700, marginBottom:10}}>Voulez-vous valider ?</div>
               <div className="modal-actions">
                 <button className="btn-cancel" onClick={()=>setConfirming(false)} disabled={busy}>NON</button>
